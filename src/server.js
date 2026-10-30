@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { SwarmStore, TASK_STATUSES, deliveryText, pushEvent, unreadMessages } from "./store.js";
+import { SwarmStore, TASK_STATUSES, deliveryText, owedReplies, pushEvent, replyRequiredText, unreadMessages } from "./store.js";
 import { PLAYBOOKS, SERVER_INSTRUCTIONS, managerPrompt, workerPrompt, reviewerPrompt } from "./prompts.js";
 import { recordWait, waitPolicy } from "./waits.js";
 import { updateNotice } from "./update.js";
@@ -147,11 +147,14 @@ export function summarize(state, me) {
   const lines = [`Swarm "${state.swarm}"${state.finishedAt ? " (finished)" : ""}${state.goal ? ` — goal: ${state.goal}` : ""}`];
   lines.push("", "Agents:");
   if (!agents.length) lines.push("  (none)");
-  for (const a of agents)
+  for (const a of agents) {
+    const owed = owedReplies(state, a.name);
     lines.push(
       `  ${a.name}${a.name === me ? " (you)" : ""} — ${a.role}${a.client ? ` via ${a.client}` : ""}, ${a.name === me ? "active" : agentState(state, a)}` +
+        (owed.length ? `, owes a reply to ${owed.map((m) => `#${m.id}`).join(", ")}` : "") +
         (a.about ? ` — ${a.about}` : ""),
     );
+  }
   const alerts = stallAlerts(state, me);
   if (alerts.length) lines.push("", "Needs attention:", ...alerts.map((x) => `  ${x.text}`));
   lines.push("", "Tasks:");
@@ -240,6 +243,16 @@ export function createServer() {
     }
   };
 
+  // Tools that act (claim, update, create, lock, write notes, finish) are refused while the agent owes
+  // a reply, so a message can't be ignored. Reading and message_send stay open, so it can always answer.
+  const gatedTool = (fn) =>
+    tool(async (args, s, extra) => {
+      const owed = await s.store.view((state) => owedReplies(state, s.name));
+      if (!owed.length) return fn(args, s, extra);
+      await s.store.update((state) => state.agents[s.name] && takeMessages(state, s.name));
+      return fail(replyRequiredText(owed));
+    });
+
   // Messages reach a busy agent with whatever swarm call it makes next, not only via swarm_inbox.
   async function withMessages(s, result) {
     if (result.isError || !s.store) return result;
@@ -268,6 +281,11 @@ export function createServer() {
   // One claim attempt under the lock: the reply text, or null when there is nothing for this agent yet.
   function claimOnce(state, me, taskId) {
     touch(state, me);
+    const owed = owedReplies(state, me); // a message arrived while waiting: answer it first
+    if (owed.length) {
+      takeMessages(state, me);
+      return replyRequiredText(owed);
+    }
     const busy = state.tasks.find((t) => t.assignee === me && t.status === "in_progress");
     if (busy && busy.id === taskId) return workOn(state, me, busy, "You are already working on");
     if (busy)
@@ -458,7 +476,7 @@ export function createServer() {
           .min(1),
       },
     },
-    tool(async ({ tasks }, s) => {
+    gatedTool(async ({ tasks }, s) => {
       const out = await s.store.update((state) => {
         touch(state, s.name);
         const created = [];
@@ -548,7 +566,7 @@ export function createServer() {
           .describe("Leave unset to wait as long as your app allows. 0 = don't wait."),
       },
     },
-    tool(async ({ task_id, wait_seconds }, s, extra) => {
+    gatedTool(async ({ task_id, wait_seconds }, s, extra) => {
       let reply = await s.store.update((state) => claimOnce(state, s.name, task_id));
       let waited = 0;
       if (reply === null && !task_id && wait_seconds !== 0) {
@@ -590,7 +608,7 @@ export function createServer() {
         description: z.string().optional(),
       },
     },
-    tool(async ({ task_id, status, note, result, assignee, title, description }, s) => {
+    gatedTool(async ({ task_id, status, note, result, assignee, title, description }, s) => {
       const out = await s.store.update((state) => {
         touch(state, s.name);
         const task = state.tasks.find((t) => t.id === task_id);
@@ -644,15 +662,24 @@ export function createServer() {
     {
       title: "Send message",
       description:
-        "Send a message to another agent by name, to everyone with a role (e.g. 'manager', 'worker'), to a comma-separated list, or to 'all'. Use it for questions, hand-offs, interface contracts and status reports.",
+        "Send a message to another agent by name, to everyone with a role (e.g. 'manager', 'worker'), to a comma-separated list, or to 'all'. Use it for questions, hand-offs, interface contracts and status reports. Every message must be answered: recipients can't use their other tools until they reply. To reply, pass reply_to with the message number (to defaults to its sender); replies themselves need no answer.",
       inputSchema: {
-        to: z.string().describe("Agent name, role name, comma-separated names, or 'all'"),
+        to: z.string().optional().describe("Agent name, role name, comma-separated names, or 'all'. Optional when replying."),
         content: z.string().min(1),
+        reply_to: z.number().int().optional().describe("The message number you are answering"),
+        expect_reply: z.boolean().optional().describe("Default true. Set false only for a pure notice that needs no answer."),
       },
     },
-    tool(async ({ to, content }, s) => {
+    tool(async ({ to, content, reply_to, expect_reply }, s) => {
       const out = await s.store.update((state) => {
         touch(state, s.name);
+        let original;
+        if (reply_to) {
+          original = state.messages.find((m) => m.id === reply_to);
+          if (!original) throw new Error(`No message #${reply_to}`);
+          to ||= original.from;
+        }
+        if (!to) throw new Error('Say who the message is for: to="<agent name>", a role, or "all".');
         let recipients;
         if (to.trim().toLowerCase() === "all") recipients = "*";
         else {
@@ -669,9 +696,13 @@ export function createServer() {
           recipients = [...new Set(recipients)];
         }
         state.seq.message += 1;
-        const msg = { id: state.seq.message, at: now(), from: s.name, to: recipients, content };
+        const msg = { id: state.seq.message, at: now(), from: s.name, to: recipients, content, replyTo: reply_to ?? null, needsReply: !reply_to && expect_reply !== false };
         state.messages.push(msg);
-        pushEvent(state, s.name, "message", `${s.name} messaged ${recipients === "*" ? "all" : recipients.join(",")}`);
+        pushEvent(state, s.name, "message", `${s.name} ${reply_to ? `replied to #${reply_to} for` : "messaged"} ${recipients === "*" ? "all" : recipients.join(",")}`);
+        const stillOwed = owedReplies(state, s.name);
+        if (reply_to) {
+          return `Replied to #${reply_to} (sent as message #${msg.id}).${stillOwed.length ? `\n\n${replyRequiredText(stillOwed)}` : " You're unblocked: carry on with your work."}`;
+        }
         const unknown = recipients === "*" ? [] : recipients.filter((r) => !state.agents[r]);
         const busy = state.tasks.some((t) => t.assignee === s.name && t.status === "in_progress");
         const next =
@@ -680,7 +711,8 @@ export function createServer() {
             : busy
               ? "Keep working on your task meanwhile; replies show up in swarm_inbox."
               : "Then call task_claim; it wakes up when someone replies or posts work.";
-        return `Sent message #${msg.id} to ${recipients === "*" ? "all" : recipients.join(", ")}.${unknown.length ? ` (${unknown.join(", ")} not joined yet — they'll get it when they join.)` : ""} ${next}`;
+        const owed = stillOwed.length ? `\n\n${replyRequiredText(stillOwed)}` : "";
+        return `Sent message #${msg.id} to ${recipients === "*" ? "all" : recipients.join(", ")}.${unknown.length ? ` (${unknown.join(", ")} not joined yet — they'll get it when they join.)` : ""}${msg.needsReply ? " They have to reply before they can go on; the reply comes to you." : ""} ${next}${owed}`;
       });
       return text(out);
     }),
@@ -716,7 +748,10 @@ export function createServer() {
         agent.alerted = [...(agent.alerted || []), ...alerts.map((x) => x.key)].slice(-50);
         const next = isManager(state) ? null : claimable(state, s.name)[0];
         const open = state.tasks.some((t) => !["done", "cancelled"].includes(t.status));
-        const after = isManager(state)
+        const owed = owedReplies(state, s.name);
+        const after = owed.length
+          ? replyRequiredText(owed)
+          : isManager(state)
           ? open
             ? "Then call swarm_inbox again to keep watching. Don't end your turn while there is open work."
             : "If the goal is met and verified, tell everyone to stop and report to the user. Otherwise create the next tasks."
@@ -749,7 +784,7 @@ export function createServer() {
         append: z.boolean().optional(),
       },
     },
-    tool(async ({ key, value, append }, s) => {
+    gatedTool(async ({ key, value, append }, s) => {
       const out = await s.store.update((state) => {
         touch(state, s.name);
         if (!value) {
@@ -798,7 +833,7 @@ export function createServer() {
         wait_seconds: z.number().min(0).max(3600).optional().describe("lock only: leave unset to wait for a held lock. 0 = don't wait."),
       },
     },
-    tool(async ({ action, paths = [], task_id, wait_seconds }, s, extra) => {
+    gatedTool(async ({ action, paths = [], task_id, wait_seconds }, s, extra) => {
       const norm = (p) => p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
       const overlaps = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
       // Lock under the store lock: the reply, or null while another agent holds one of the paths.
@@ -858,13 +893,13 @@ export function createServer() {
         "Manager only: end the swarm once the goal is met and verified. Tells every agent to stop (and lets them stop), keeping the board for reference. Creating a new task reopens it.",
       inputSchema: { summary: z.string().min(1).describe("What was achieved, for the team") },
     },
-    tool(async ({ summary }, s) => {
+    gatedTool(async ({ summary }, s) => {
       const out = await s.store.update((state) => {
         if (touch(state, s.name).role.toLowerCase() !== "manager") throw new Error("Only the manager can finish the swarm.");
         const open = state.tasks.filter((t) => !["done", "cancelled"].includes(t.status));
         state.finishedAt = now();
         state.seq.message += 1;
-        state.messages.push({ id: state.seq.message, at: now(), from: s.name, to: "*", content: `The swarm is finished: ${summary} Stop working now.` });
+        state.messages.push({ id: state.seq.message, at: now(), from: s.name, to: "*", content: `The swarm is finished: ${summary} Stop working now.`, needsReply: false });
         pushEvent(state, s.name, "finish", `${s.name} finished the swarm: ${summary}`);
         return `Swarm "${state.swarm}" is finished and everyone was told to stop.${open.length ? ` Note: ${ids(open)} ${open.length > 1 ? "were" : "was"} still open.` : ""} Now report to the user.`;
       });

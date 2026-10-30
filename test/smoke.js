@@ -73,9 +73,13 @@ try {
   const waiting = mgr.call("swarm_inbox", { wait_seconds: 10 });
   await codex.call("message_send", { to: "manager", content: "Should todos have due dates?" });
   const inbox = await waiting;
-  assert.match(inbox, /codex -> manager: Should todos have due dates\?/);
-  await mgr.call("message_send", { to: "all", content: "No due dates for v1." });
-  assert.match(await codex.call("swarm_inbox", { wait_seconds: 0 }), /No due dates for v1/);
+  assert.match(inbox, /codex -> manager: Should todos have due dates\?[\s\S]*Reply before you do anything else/);
+  // Until it replies, the manager's acting tools are refused; replying unblocks it, and replies need no answer.
+  await assert.rejects(mgr.call("task_create", { tasks: [{ title: "x" }] }), /unanswered swarm message[\s\S]*#1 from codex\] Should todos/);
+  assert.match(await mgr.call("message_send", { reply_to: 1, content: "No due dates for v1." }), /Replied to #1 .*You're unblocked/);
+  const answer = await codex.call("swarm_inbox", { wait_seconds: 0 });
+  assert.match(answer, /manager -> codex: No due dates for v1/);
+  assert.doesNotMatch(answer, /Reply before you do anything else/, "a reply should not need a reply");
 
   // antigravity waits for codex's lock; finishing the task releases it and antigravity gets it.
   const pendingLock = agy.call("file_lock", { action: "lock", paths: ["src/api/routes.js"] });
@@ -110,13 +114,24 @@ try {
   const pendingMsg = codex.call("task_claim", { wait_seconds: 20 });
   await sleep(1000);
   await mgr.call("message_send", { to: "codex", content: "Hold on, new plan coming" });
-  assert.match(await pendingMsg, /Hold on, new plan coming[\s\S]*No task for you yet/);
+  const woke = await pendingMsg;
+  assert.match(woke, /unanswered swarm message[\s\S]*Hold on, new plan coming/);
+  const holdId = Number(/#(\d+) from manager\] Hold on/.exec(woke)[1]);
+  assert.match(await mgr.call("swarm_status"), new RegExp(`codex — worker via Codex, .*owes a reply to #${holdId}`));
+  await codex.call("message_send", { reply_to: holdId, content: "OK, standing by for it" });
 
-  // A busy agent gets new messages attached to whatever swarm call it makes next, once.
+  // A busy agent gets new messages attached to whatever swarm call it makes next, once...
   await mgr.call("message_send", { to: "codex", content: "Use port 8080, not 3000" });
   const piggy = await codex.call("note_get", { key: "api-contract" });
-  assert.match(piggy, /GET \/todos[\s\S]*NEW SWARM MESSAGE[\s\S]*\[msg #\d+ from manager\] Use port 8080, not 3000/);
+  assert.match(piggy, /GET \/todos[\s\S]*NEW SWARM MESSAGE[\s\S]*\[msg #\d+ from manager\] Use port 8080, not 3000[\s\S]*You must reply/);
   assert.doesNotMatch(await codex.call("note_get", { key: "api-contract" }), /NEW SWARM MESSAGE/, "message delivered twice");
+  // ...and can't claim or update anything until it answers.
+  await assert.rejects(codex.call("task_claim", { wait_seconds: 0 }), /Reply before you do anything else[\s\S]*Use port 8080/);
+  const portId = Number(/\[msg #(\d+) from manager\] Use port 8080/.exec(piggy)[1]);
+  await codex.call("message_send", { reply_to: portId, content: "Switching to 8080" });
+  // A notice sent with expect_reply=false blocks nobody.
+  await mgr.call("message_send", { to: "codex", content: "FYI: CI is green", expect_reply: false });
+  assert.match(await codex.call("task_claim", { wait_seconds: 0 }), /FYI: CI is green[\s\S]*No reply needed|No task for you yet/);
 
   // A second manager gets told to join as a worker.
   assert.match(await codex.call("swarm_join", { name: "codex", role: "manager" }), /WARNING: manager is already the manager/);

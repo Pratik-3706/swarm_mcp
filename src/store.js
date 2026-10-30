@@ -157,12 +157,45 @@ export function unreadMessages(state, name) {
   return state.messages.filter((m) => m.id > agent.msgCursor && m.from !== name && (m.to === "*" || m.to.includes(name)));
 }
 
+/**
+ * Messages this agent still has to answer. Every message needs a reply except replies themselves
+ * (so nobody gets stuck in an answer-the-answer loop) and notices sent with expect_reply=false.
+ * Broadcasts from before the agent joined don't count.
+ */
+export function owedReplies(state, name) {
+  const agent = state.agents[name];
+  if (!agent) return [];
+  const answered = new Set(state.messages.filter((m) => m.from === name && m.replyTo).map((m) => m.replyTo));
+  return state.messages.filter(
+    (m) =>
+      m.needsReply &&
+      m.from !== name &&
+      !answered.has(m.id) &&
+      (m.to === "*" ? m.at >= agent.joinedAt : m.to.includes(name)),
+  );
+}
+
+const fmtOwed = (m) => `[msg #${m.id} from ${m.from}] ${m.content}`;
+
 /** How a message reaches an agent in the middle of other work (attached to a tool result, or injected by a hook). */
 export function deliveryText(messages) {
   const many = messages.length > 1;
+  const owed = messages.filter((m) => m.needsReply);
   return [
-    `NEW SWARM MESSAGE${many ? "S" : ""}. Read ${many ? "them" : "it"} and act on ${many ? "them" : "it"} now, before you continue: instructions from the manager override your current plan, and if someone asked you something, answer with message_send.`,
-    ...messages.map((m) => `[msg #${m.id} from ${m.from}] ${m.content}`),
+    `NEW SWARM MESSAGE${many ? "S" : ""}. Stop what you are doing and read ${many ? "them" : "it"} now.`,
+    ...messages.map(fmtOwed),
+    owed.length
+      ? `You must reply before you do anything else: message_send(reply_to=${owed[0].id}, content="...")${owed.length > 1 ? ` and the same for ${owed.slice(1).map((m) => `#${m.id}`).join(", ")}` : ""}. Answer the question or confirm what you'll do. Your other tools stay blocked until you reply. Instructions from the manager override your current plan.`
+      : "No reply needed. Act on it if it concerns you, then continue.",
+  ].join("\n");
+}
+
+/** Why an agent with unanswered messages can't go on yet. */
+export function replyRequiredText(owed) {
+  return [
+    `You have ${owed.length} unanswered swarm message${owed.length > 1 ? "s" : ""}. Reply before you do anything else:`,
+    ...owed.map(fmtOwed),
+    `Call message_send(reply_to=${owed[0].id}, content="your answer")${owed.length > 1 ? ` once per message (${owed.map((m) => `#${m.id}`).join(", ")})` : ""}. Answer the question, or confirm what you'll do about it. Then carry on: replying is all it takes to unblock you.`,
   ].join("\n");
 }
 

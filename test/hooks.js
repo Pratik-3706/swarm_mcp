@@ -69,6 +69,20 @@ assert.equal(hook("post-tool", { session_id: "s1", tool_name: "Edit", tool_input
 // Unread messages also ride along when the hook keeps an agent from stopping.
 cli("call", "message_send", "--as", "boss", "--to", "w1", "--content", "Also check mobile");
 assert.match(stop("s1").reason, /Also check mobile[\s\S]*call task_claim/);
+// While w1 owes replies, its next tool of any kind is refused, except the swarm tools it needs to reply.
+const pre = (tool, toolInput = {}) => {
+  const out = hook("pre-tool", { session_id: "s1", hook_event_name: "PreToolUse", tool_name: tool, tool_input: toolInput });
+  return out ? JSON.parse(out) : null;
+};
+const denied = pre("Edit", { file_path: "app.css" });
+assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
+assert.match(denied.hookSpecificOutput.permissionDecisionReason, /2 unanswered swarm messages[\s\S]*#1 from boss[\s\S]*#2 from boss/);
+assert.equal(pre("mcp__swarm__message_send"), null);
+assert.equal(pre("Bash", { command: `node "${entry.replace(/\\/g, "/")}" call message_send --as w1 --reply_to 1 --content ok` }), null);
+assert.equal(pre("Bash", { command: "npm test" })?.decision, "block");
+assert.match(cli("call", "message_send", "--as", "w1", "--reply_to", "1", "--content", "Moving to theme.css").out, /Replied to #1[\s\S]*unanswered swarm message[\s\S]*#2/);
+assert.match(cli("call", "message_send", "--as", "w1", "--reply_to", "2", "--content", "Will check mobile").out, /You're unblocked/);
+assert.equal(pre("Edit", { file_path: "theme.css" }), null, "still blocked after replying");
 
 // The shell fallback counts as joining too (any `call` joins first).
 hook("post-tool", { session_id: "s2", tool_name: "Bash", tool_input: { command: `node "${entry.replace(/\\/g, "/")}" call task_claim --as w1` } });

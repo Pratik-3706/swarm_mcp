@@ -29,11 +29,11 @@ const INSTRUCTION_TARGETS = [
   { id: "gemini", app: "Gemini CLI", file: path.join(HOME, ".gemini", "GEMINI.md"), only: path.join(HOME, ".gemini", "settings.json") },
 ];
 
-const isOurs = (command) => typeof command === "string" && /swarm/i.test(command) && /index\.js"?\s+hook\s+(stop|post-tool)\s*$/.test(command);
+const isOurs = (command) => typeof command === "string" && /swarm/i.test(command) && /index\.js"?\s+hook\s+(stop|post-tool|pre-tool)\s*$/.test(command);
 
 function hookCommands(entry) {
-  const cmd = (kind) => `node "${entry.replace(/\\/g, "/")}" hook ${kind}`;
-  return { stop: { type: "command", command: cmd("stop"), timeout: 30 }, post: { type: "command", command: cmd("post-tool"), timeout: 30 } };
+  const cmd = (kind) => ({ type: "command", command: `node "${entry.replace(/\\/g, "/")}" hook ${kind}`, timeout: 30 });
+  return { stop: cmd("stop"), post: cmd("post-tool"), pre: cmd("pre-tool") };
 }
 
 function readJson(file) {
@@ -58,10 +58,10 @@ export function editHooks(id, entry, { remove, dryRun, verb, backup }) {
     return `skipped hooks for ${t.app}: ${t.file} is not valid JSON`;
   }
   const before = JSON.stringify(config);
-  const { stop, post } = hookCommands(entry);
+  const { stop, post, pre } = hookCommands(entry);
   if (t.format === "claude") {
     config.hooks ||= {};
-    const ours = { Stop: { hooks: [stop] }, PostToolUse: { matcher: t.matcher, hooks: [post] } };
+    const ours = { Stop: { hooks: [stop] }, PreToolUse: { matcher: t.matcher, hooks: [pre] }, PostToolUse: { matcher: t.matcher, hooks: [post] } };
     for (const event of Object.keys(ours)) {
       const groups = (config.hooks[event] || [])
         .map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => !isOurs(h.command)) }))
@@ -72,7 +72,13 @@ export function editHooks(id, entry, { remove, dryRun, verb, backup }) {
     }
     if (!Object.keys(config.hooks).length) delete config.hooks;
   } else if (remove) delete config["swarm-mcp"];
-  else config["swarm-mcp"] = { enabled: true, Stop: [{ hooks: [stop] }], PostToolUse: [{ matcher: t.matcher, hooks: [post] }] };
+  else
+    config["swarm-mcp"] = {
+      enabled: true,
+      Stop: [{ hooks: [stop] }],
+      PreToolUse: [{ matcher: t.matcher, hooks: [pre] }],
+      PostToolUse: [{ matcher: t.matcher, hooks: [post] }],
+    };
   if (JSON.stringify(config) === before && remove) return null;
   if (!dryRun) writeFile(t.file, `${JSON.stringify(config, null, 2)}\n`, backup);
   const trust = id === "codex" && !remove ? " (Codex asks you once to trust new hooks: approve the swarm ones)" : "";
@@ -90,7 +96,9 @@ When the user asks you to join, connect to, manage or work in "the swarm":
   - \`${run} call swarm_join --as <your-name> --role <worker|manager|reviewer>\`
   - \`${run} call task_claim --as <your-name>\` (waits for work)
   - \`${run} call task_update --as <your-name> --task_id 3 --status done --result "what changed"\`
+  - \`${run} call message_send --as <your-name> --reply_to 7 --content "your answer"\`
   - Any tool works this way: \`call <tool> --as <your-name> --<arg> <value> ...\`. Mention to the user that restarting the app loads the MCP tools.
+- Every swarm message must be answered. When one shows up ("NEW SWARM MESSAGE"), stop and reply with message_send(reply_to=<its number>) before anything else; your other tools are blocked until you do.
 - Once joined, stay in the swarm and keep working or waiting until the manager calls swarm_finish, or the user tells you to stop (then call swarm_leave first).
 ${MARK_END}`;
 }

@@ -14,7 +14,7 @@ Roles:
 - worker: loop task_claim (it waits until a task is available) -> do the work in the repo -> task_update(status="done", result=...) -> task_claim again. Never end your turn because there is no task yet; stop only when the manager says so.
 - reviewer: watch for tasks in "review" status, check the work, then mark done or send it back to todo with a note.
 
-Messages: teammates' messages can reach you in the middle of other work, attached to a tool result under "NEW SWARM MESSAGE". Read them as soon as they appear and act on them before you continue: the manager's instructions override your current plan, and questions to you need an answer (message_send). While you work on a long task, call swarm_inbox(wait_seconds=0) now and then, for example after each step.
+Messages: every message you get must be answered, no matter what you are doing. They reach you in the middle of other work, attached to a tool result under "NEW SWARM MESSAGE". As soon as one appears, stop and reply with message_send(reply_to=<message number>, content=...): answer the question, or confirm what you'll do. Until you reply, your other swarm tools (and, in apps with the swarm hooks, all your other tools) are refused. Replies need no answer, so a reply ends the exchange. The manager's instructions override your current plan. While you work on a long task, call swarm_inbox(wait_seconds=0) now and then, for example after each step.
 
 Etiquette: lock files before editing ones others might touch (file_lock), record decisions and contracts in shared notes (note_set), keep messages short and specific, and never mark a task done without verifying it.`;
 
@@ -23,7 +23,7 @@ export const PLAYBOOKS = {
 1. Understand the goal and the codebase (read the repo, run it if needed). Write key decisions to shared notes (note_set "plan", "conventions", "api-contract").
 2. Check swarm_status to see which agents have joined, what they are good at, and whether they are waiting for work.
 3. Break the goal into tasks with task_create: small enough for one agent, each owning distinct files/areas so agents don't collide, with acceptance criteria in the description. Use depends_on for ordering ("$1" = first task of the batch). Assign to specific agents or leave unassigned so any worker can claim.
-4. Tell the team: message_send(to="all", ...) with the plan summary.
+4. Tell the team: message_send(to="all", ...) with the plan summary. Every message makes its recipients stop and reply (you'll get one reply each), so for a pure notice that needs no answer pass expect_reply=false. Answer workers' messages promptly with message_send(reply_to=N): until you do, your own task and update tools are blocked.
 5. Loop on swarm_inbox (it waits for activity). Answer questions, unblock blocked tasks, check finished results (task_list status=done / review), create fix-up tasks for anything wrong.
 6. Agents can stop: their turn ends, or they wait on their user. swarm_status shows each one as "waiting for work", "working on #N" or "idle ... probably stopped", and swarm_inbox alerts you under "Needs attention". Move stalled work to an agent that is waiting (task_update assignee=...). If nobody else can take it, tell the user which agent to nudge.
 7. Never tell a worker it has "no more tasks", to "stay in the inbox", to "stand by" or to stop: workers wait for new work inside task_claim on their own, and words like that make them end their turn. Just create the next task when there is one.

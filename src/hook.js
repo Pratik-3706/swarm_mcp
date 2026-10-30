@@ -5,14 +5,16 @@
 // keep going with that reason as its next instruction. The hook only acts on conversations
 // that joined a swarm: a PostToolUse hook on swarm_join records which conversation is which
 // agent, so other chats in the same app are never held back. The same PostToolUse hook also hands a
-// busy agent messages from teammates after each tool it uses, so they reach it mid-task.
+// busy agent messages from teammates after each tool it uses, so they reach it mid-task, and a
+// PreToolUse hook refuses its next tool (anything but the swarm tools) until it has replied.
 //
+//   swarm-mcp hook pre-tool    (PreToolUse)  block other tools while this agent owes a reply to a message
 //   swarm-mcp hook post-tool   (PostToolUse) remember / forget this conversation's identity; deliver messages
 //   swarm-mcp hook stop        (Stop)        block stopping while the swarm still needs this agent
 
 import fs from "node:fs";
 import path from "node:path";
-import { SwarmStore, deliveryText, swarmHome, unreadMessages } from "./store.js";
+import { SwarmStore, deliveryText, owedReplies, replyRequiredText, swarmHome, unreadMessages } from "./store.js";
 
 // The swarm counts as abandoned after this long without any activity; then nobody is held back.
 const QUIET_LIMIT_MS = 2 * 60 * 60_000;
@@ -86,6 +88,27 @@ async function deliverMessages(session, event) {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: deliveryText(messages) } }));
 }
 
+// Before each tool: while the agent owes a reply, only swarm tools (MCP, or the shell fallback) may run.
+async function gateTool(input, session) {
+  const file = sessionFile(session);
+  if (!fs.existsSync(file)) return;
+  const link = JSON.parse(fs.readFileSync(file, "utf8"));
+  const owed = await new SwarmStore(link.swarm).view((state) => owedReplies(state, link.name));
+  if (!owed.length) return;
+  const tool = String(pick(input, "tool_name", "toolName", "name") || "");
+  let args = pick(input, "tool_input", "toolInput", "arguments", "input") || {};
+  if (typeof args === "string") args = { command: args };
+  if (/swarm/i.test(tool) || shellCall(args.command)) return; // replying (and reading) is always allowed
+  const reason = replyRequiredText(owed);
+  process.stdout.write(
+    JSON.stringify({
+      decision: "block",
+      reason,
+      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
+    }),
+  );
+}
+
 async function decideStop(session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return; // this conversation never joined a swarm
@@ -93,14 +116,16 @@ async function decideStop(session) {
   const state = await new SwarmStore(link.swarm).view();
   const agent = state.agents[link.name];
   const lastActivity = Date.parse(state.events.at(-1)?.at || state.createdAt);
-  if (!agent || agent.status === "offline" || state.finishedAt || Date.now() - lastActivity > QUIET_LIMIT_MS) {
+  const owed = agent ? owedReplies(state, link.name) : [];
+  // Unanswered messages keep an agent here even in a finished swarm, until it replies.
+  if (!agent || agent.status === "offline" || (!owed.length && (state.finishedAt || Date.now() - lastActivity > QUIET_LIMIT_MS))) {
     fs.rmSync(file, { force: true });
     return;
   }
   // Loop guard: if the agent made no swarm call since the last block, it can't (or won't) use the tools.
   if (link.blockedAt && agent.lastSeen <= link.blockedAt) link.strikes = (link.strikes || 0) + 1;
   else link.strikes = 0;
-  if (link.strikes >= MAX_STRIKES) {
+  if (link.strikes >= (owed.length ? MAX_STRIKES * 2 : MAX_STRIKES)) {
     fs.writeFileSync(file, JSON.stringify({ ...link, blockedAt: null, strikes: 0 }));
     return;
   }
@@ -117,7 +142,8 @@ async function decideStop(session) {
   else
     reason = `You are "${agent.name}", a ${agent.role} in swarm "${state.swarm}", and the swarm isn't finished. Don't stop yet: call task_claim to get your next task (it waits until there is one), then do it.`;
   reason += " If the user told you to stop, call swarm_leave first; then you may stop.";
-  const unread = await takeUnread(session);
+  if (owed.length) reason = state.finishedAt ? `${replyRequiredText(owed)} After that you may stop: the swarm is finished.` : `${replyRequiredText(owed)}\n\n${reason}`;
+  const unread = (await takeUnread(session)).filter((m) => !owed.some((o) => o.id === m.id));
   if (unread.length) reason = `${deliveryText(unread)}\n\n${reason}`;
 
   fs.writeFileSync(file, JSON.stringify({ ...link, blockedAt: new Date().toISOString() }));
@@ -129,7 +155,8 @@ export async function runHook(kind) {
   const session = pick(input, "session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId");
   if (!session) return;
   try {
-    if (kind === "post-tool") {
+    if (kind === "pre-tool") await gateTool(input, session);
+    else if (kind === "post-tool") {
       recordJoin(input, session);
       await deliverMessages(session, pick(input, "hook_event_name", "hookEventName") || "PostToolUse");
     }

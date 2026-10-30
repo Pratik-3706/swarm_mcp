@@ -91,6 +91,11 @@ That's all. The server tells each agent its playbook when it joins:
   - **Apps with the hook:** the hook also injects new messages after every tool the agent uses, such as a file edit or a shell command.
 
   Either way, each message is delivered once, marked as a "NEW SWARM MESSAGE", and the agent is told to act on it before continuing.
+- **Every message must be answered.** An agent that receives a message has to reply with `message_send(reply_to=N, ...)` before it can do anything else:
+  - **Any MCP agent:** the swarm tools that act (`task_claim`, `task_update`, `task_create`, `file_lock`, `note_set`, `swarm_finish`) refuse and show the message to answer.
+  - **Apps with the hooks:** a `PreToolUse` hook blocks the agent's next tool of any kind once its current tool finishes, until it replies. The Stop hook won't let it quit with a reply owed, either.
+
+  Replies need no answer, so an exchange always ends. Notices sent with `expect_reply=false` block nobody. `swarm_status` shows who owes a reply.
 - The manager can see whether each agent is *waiting for work*, *working on #N*, or *idle (probably stopped)*. It gets an alert when work is assigned to an agent that stopped, so it can reassign the work or tell you which agent to nudge.
 
 In Claude Code the prompts are also slash commands: `/mcp__swarm__manager`, `/mcp__swarm__worker`, `/mcp__swarm__reviewer`.
@@ -139,7 +144,7 @@ Each swarm has a name (default `default`). Use a different one per project, for 
 | `task_list` | Task details, filtered by status, assignee or id |
 | `task_claim` | Take the best available task (or a specific one). Waits for one if there's none yet. One task at a time |
 | `task_update` | Status (`todo / in_progress / blocked / review / done / cancelled`), notes, result, reassign |
-| `message_send` | Message an agent, a role (`manager`, `worker`), a list, or `all` |
+| `message_send` | Message an agent, a role (`manager`, `worker`), a list, or `all`. Recipients must reply (`reply_to`) before they can go on, unless `expect_reply=false` |
 | `swarm_inbox` | Unread messages and board activity. Waits until something arrives |
 | `note_set` / `note_get` | Shared notes |
 | `file_lock` | Lock, unlock or list advisory file locks. Locking a held file waits until it's free. Locks are released when the task is done, or when their holder has been inactive for 10 minutes |
@@ -190,7 +195,13 @@ args = ['C:\path\to\swarm_mcp\src\index.js']
 tool_timeout_sec = 3700
 ```
 
-For an app with Claude-style hooks, the Stop hook is `node "<path>/src/index.js" hook stop`. It also needs `node "<path>/src/index.js" hook post-tool` as a `PostToolUse` hook.
+For an app with Claude-style hooks, add these three hooks:
+
+| Event | Command |
+|---|---|
+| `Stop` | `node "<path>/src/index.js" hook stop` |
+| `PreToolUse` | `node "<path>/src/index.js" hook pre-tool` |
+| `PostToolUse` | `node "<path>/src/index.js" hook post-tool` |
 
 Optional env vars:
 
@@ -223,4 +234,6 @@ npm test
   - the shell fallback
   - the Stop hook: who it holds back, the loop guard, and `swarm_leave` / `swarm_finish`
   - that messages are injected after any tool use, and when stopping
+  - that other tools are blocked until the agent replies, while swarm tools stay allowed
+- The smoke test also checks that an agent can't claim or update anything until it replies, that replies and `expect_reply=false` notices block nobody, and that `swarm_status` shows who owes a reply.
   - that the installer adds hooks and instructions without touching your own settings, and removes them cleanly
