@@ -42,7 +42,10 @@ export function runUpdate({ check = false, install = true } = {}) {
   }
   saveCheck(behind);
   if (!behind) return console.log(`swarm-mcp is up to date (${git("rev-parse", "--short", "HEAD")}).`);
-  const pending = git("log", "--format=  %h %s", "HEAD..@{u}");
+  const pending = git("log", "--format=%h %s", "HEAD..@{u}")
+    .split("\n")
+    .map((l) => `  ${l}`)
+    .join("\n");
   if (check) return console.log(`A newer swarm-mcp is available (${behind} new commit${behind > 1 ? "s" : ""}):\n${pending}\nRun: node "${ENTRY}" update`);
 
   // npm install rewrites package-lock.json by itself; that isn't a local change worth keeping.
