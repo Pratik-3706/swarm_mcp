@@ -14,6 +14,8 @@ Roles:
 - worker: loop task_claim (it waits until a task is available) -> do the work in the repo -> task_update(status="done", result=...) -> task_claim again. Never end your turn because there is no task yet; stop only when the manager says so.
 - reviewer: watch for tasks in "review" status, check the work, then mark done or send it back to todo with a note.
 
+Messages: teammates' messages can reach you in the middle of other work, attached to a tool result under "NEW SWARM MESSAGE". Read them as soon as they appear and act on them before you continue: the manager's instructions override your current plan, and questions to you need an answer (message_send). While you work on a long task, call swarm_inbox(wait_seconds=0) now and then, for example after each step.
+
 Etiquette: lock files before editing ones others might touch (file_lock), record decisions and contracts in shared notes (note_set), keep messages short and specific, and never mark a task done without verifying it.`;
 
 export const PLAYBOOKS = {
@@ -32,7 +34,7 @@ Work on your own. Don't ask the user for approval, and don't show them a plan to
 1. Read shared notes (note_get) for the plan and conventions.
 2. Call task_claim. If there is no task yet it waits for one; when it returns without a task, call it again. Keep doing this, and don't end your turn while you wait.
 3. Lock the files you will edit: file_lock(action="lock", paths=[...], task_id=N). If another agent holds one, file_lock waits until it is free; call it again if it returns still locked.
-4. Do the work in the repo. Stay inside the task's scope. Verify it (build/tests).
+4. Do the work in the repo. Stay inside the task's scope. Verify it (build/tests). Between steps, call swarm_inbox(wait_seconds=0), and whenever a "NEW SWARM MESSAGE" shows up in a tool result, deal with it before going on.
 5. task_update(task_id=N, status="done", result="what changed, files, how to verify"). If you're stuck, use status="blocked" with a note and message the manager.
 6. Go back to step 2. Stop only when the manager says everything is finished, or the user tells you to stop.`,
   reviewer: `REVIEWER PLAYBOOK

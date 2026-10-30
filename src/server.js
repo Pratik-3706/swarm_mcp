@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { SwarmStore, TASK_STATUSES, pushEvent } from "./store.js";
+import { SwarmStore, TASK_STATUSES, deliveryText, pushEvent, unreadMessages } from "./store.js";
 import { PLAYBOOKS, SERVER_INSTRUCTIONS, managerPrompt, workerPrompt, reviewerPrompt } from "./prompts.js";
 import { recordWait, waitPolicy } from "./waits.js";
 
@@ -233,11 +233,23 @@ export function createServer() {
   const tool = (fn) => async (args, extra) => {
     try {
       const s = await requireJoin();
-      return await fn(args, s, extra);
+      return withMessages(s, await fn(args, s, extra));
     } catch (err) {
       return fail(err.message);
     }
   };
+
+  // Messages reach a busy agent with whatever swarm call it makes next, not only via swarm_inbox.
+  async function withMessages(s, result) {
+    if (result.isError || !s.store) return result;
+    try {
+      if (!(await s.store.view((state) => unreadMessages(state, s.name).length))) return result;
+      const messages = await s.store.update((state) => (state.agents[s.name] ? takeMessages(state, s.name) : []));
+      return messages.length ? { ...result, content: [...result.content, { type: "text", text: deliveryText(messages) }] } : result;
+    } catch {
+      return result;
+    }
+  }
 
   const member = (state, me) => {
     const a = state.agents[me];

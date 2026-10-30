@@ -14,10 +14,10 @@ const MARK_END = "<!-- swarm-mcp:end -->";
 
 // format "claude": { hooks: { Event: [{ matcher?, hooks: [{type, command, timeout}] }] } } (Claude Code, Codex)
 // format "antigravity": { <name>: { enabled, Event: [{ matcher?, hooks: [...] }] } }
-// The PostToolUse hook only needs to see swarm_join / swarm_leave (as MCP calls or shell fallback calls);
-// apps whose tool names aren't known get "*" and the hook ignores everything else.
+// The PostToolUse hook runs after every tool ("*"): it notes swarm_join / swarm_leave, and hands a joined
+// agent any messages that arrived while it was busy. For conversations outside a swarm it does nothing.
 const HOOK_TARGETS = [
-  { id: "claude", app: "Claude Code", file: path.join(HOME, ".claude", "settings.json"), format: "claude", matcher: "mcp__swarm__.*|Bash|PowerShell" },
+  { id: "claude", app: "Claude Code", file: path.join(HOME, ".claude", "settings.json"), format: "claude", matcher: "*" },
   { id: "codex", app: "Codex", file: path.join(CODEX_HOME, "hooks.json"), format: "claude", matcher: "*" },
   { id: "antigravity-ide", app: "Antigravity IDE", file: path.join(HOME, ".gemini", "config", "hooks.json"), format: "antigravity", matcher: "*" },
 ];

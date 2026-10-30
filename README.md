@@ -72,6 +72,11 @@ That's all. The server tells each agent its playbook when it joins:
 - **Workers** loop: claim a task, lock its files, do the work, mark it done with a summary, claim the next one. If there's no task yet, the claim waits until the manager posts one, so a worker that joins early or finishes first doesn't stop. A worker holds one task at a time.
 - The **reviewer** checks tasks in `review` and either approves them or sends them back with notes.
 - Agents are told to work on their own: no asking you for approval. Questions go to the manager.
+- **Messages reach busy agents mid-task.** An agent doesn't have to be waiting in `swarm_inbox` to get a message:
+  - **Any MCP agent:** unread messages are attached to the result of whatever swarm call it makes next. Workers are told to check between steps of a long task.
+  - **Apps with the hook:** the hook also injects new messages after every tool the agent uses, such as a file edit or a shell command.
+
+  Either way, each message is delivered once, marked as a "NEW SWARM MESSAGE", and the agent is told to act on it before continuing.
 - The manager can see whether each agent is *waiting for work*, *working on #N*, or *idle (probably stopped)*. It gets an alert when work is assigned to an agent that stopped, so it can reassign the work or tell you which agent to nudge.
 
 In Claude Code the prompts are also slash commands: `/mcp__swarm__manager`, `/mcp__swarm__worker`, `/mcp__swarm__reviewer`.
@@ -138,7 +143,7 @@ An agent only works while its app is running a turn, and the app decides when th
 
 **2. A Stop hook (apps with Claude-style hooks: Claude Code, Codex, Antigravity IDE):**
 - When a joined agent is about to end its turn, the hook tells it to keep going: workers call `task_claim`, the manager calls `swarm_inbox`.
-- It only acts on conversations that joined a swarm. A `PostToolUse` hook records which conversation is which agent when it calls `swarm_join`, so your other chats in the same app aren't affected.
+- It only acts on conversations that joined a swarm. A `PostToolUse` hook records which conversation is which agent when it calls `swarm_join`, so your other chats in the same app aren't affected. The same hook delivers messages after each tool use.
 - It lets the agent stop when:
   - the manager has called `swarm_finish`
   - the agent called `swarm_leave` (the instructions tell agents to do this when you ask them to stop)
@@ -197,9 +202,11 @@ npm test
   - concurrent claims, dependencies, locks, messages and notes
   - the one-task-at-a-time rule, and that a held file lock waits until it's released
   - that a waiting worker gets a task posted later, and that a message also wakes it
+  - that a busy agent gets a message with its next swarm call, exactly once
   - progress pings and cancellation, and that the wait length is learned from a cancelled or silently dropped call
   - the second-manager warning and the alert about work sitting with a stopped agent
 - `test/hooks.js` checks:
   - the shell fallback
   - the Stop hook: who it holds back, the loop guard, and `swarm_leave` / `swarm_finish`
+  - that messages are injected after any tool use, and when stopping
   - that the installer adds hooks and instructions without touching your own settings, and removes them cleanly

@@ -112,6 +112,12 @@ try {
   await mgr.call("message_send", { to: "codex", content: "Hold on, new plan coming" });
   assert.match(await pendingMsg, /Hold on, new plan coming[\s\S]*No task for you yet/);
 
+  // A busy agent gets new messages attached to whatever swarm call it makes next, once.
+  await mgr.call("message_send", { to: "codex", content: "Use port 8080, not 3000" });
+  const piggy = await codex.call("note_get", { key: "api-contract" });
+  assert.match(piggy, /GET \/todos[\s\S]*NEW SWARM MESSAGE[\s\S]*\[msg #\d+ from manager\] Use port 8080, not 3000/);
+  assert.doesNotMatch(await codex.call("note_get", { key: "api-contract" }), /NEW SWARM MESSAGE/, "message delivered twice");
+
   // A second manager gets told to join as a worker.
   assert.match(await codex.call("swarm_join", { name: "codex", role: "manager" }), /WARNING: manager is already the manager/);
   await codex.call("swarm_join", { name: "codex", role: "worker", client: "Codex" });

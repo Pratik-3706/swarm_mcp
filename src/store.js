@@ -150,6 +150,22 @@ export function listSwarms() {
     .map((f) => f.slice(0, -5));
 }
 
+/** Messages for this agent it hasn't seen yet (direct or broadcast, not its own). */
+export function unreadMessages(state, name) {
+  const agent = state.agents[name];
+  if (!agent) return [];
+  return state.messages.filter((m) => m.id > agent.msgCursor && m.from !== name && (m.to === "*" || m.to.includes(name)));
+}
+
+/** How a message reaches an agent in the middle of other work (attached to a tool result, or injected by a hook). */
+export function deliveryText(messages) {
+  const many = messages.length > 1;
+  return [
+    `NEW SWARM MESSAGE${many ? "S" : ""}. Read ${many ? "them" : "it"} and act on ${many ? "them" : "it"} now, before you continue: instructions from the manager override your current plan, and if someone asked you something, answer with message_send.`,
+    ...messages.map((m) => `[msg #${m.id} from ${m.from}] ${m.content}`),
+  ].join("\n");
+}
+
 export function pushEvent(state, by, type, text, extra = {}) {
   state.seq.event += 1;
   state.events.push({ id: state.seq.event, at: new Date().toISOString(), by, type, text, ...extra });

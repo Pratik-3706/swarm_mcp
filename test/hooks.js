@@ -60,6 +60,16 @@ assert.equal(stop("s1")?.decision, "block");
 hook("post-tool", { session_id: "m1", tool_name: "mcp__swarm__swarm_join", tool_input: { name: "boss", role: "manager" }, tool_response: 'Joined as "boss"' });
 assert.match(stop("m1").reason, /manager of swarm "default" and 1 task\(s\) are still open.*swarm_inbox/);
 
+// A message sent while w1 is busy is injected after its next tool use of any kind, once.
+cli("call", "message_send", "--as", "boss", "--to", "w1", "--content", "Stop editing app.css, use theme.css");
+const injected = JSON.parse(hook("post-tool", { session_id: "s1", hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "app.css" } }));
+assert.equal(injected.hookSpecificOutput.hookEventName, "PostToolUse");
+assert.match(injected.hookSpecificOutput.additionalContext, /NEW SWARM MESSAGE[\s\S]*from boss\] Stop editing app.css, use theme.css/);
+assert.equal(hook("post-tool", { session_id: "s1", tool_name: "Edit", tool_input: {} }), "", "message injected twice");
+// Unread messages also ride along when the hook keeps an agent from stopping.
+cli("call", "message_send", "--as", "boss", "--to", "w1", "--content", "Also check mobile");
+assert.match(stop("s1").reason, /Also check mobile[\s\S]*call task_claim/);
+
 // The shell fallback counts as joining too (any `call` joins first).
 hook("post-tool", { session_id: "s2", tool_name: "Bash", tool_input: { command: `node "${entry.replace(/\\/g, "/")}" call task_claim --as w1` } });
 assert.equal(stop("s2")?.decision, "block");

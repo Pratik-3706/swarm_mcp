@@ -4,14 +4,15 @@
 // agent is about to stop, and a hook that answers {"decision":"block","reason":...} makes it
 // keep going with that reason as its next instruction. The hook only acts on conversations
 // that joined a swarm: a PostToolUse hook on swarm_join records which conversation is which
-// agent, so other chats in the same app are never held back.
+// agent, so other chats in the same app are never held back. The same PostToolUse hook also hands a
+// busy agent messages from teammates after each tool it uses, so they reach it mid-task.
 //
-//   swarm-mcp hook post-tool   (PostToolUse) remember / forget this conversation's swarm identity
+//   swarm-mcp hook post-tool   (PostToolUse) remember / forget this conversation's identity; deliver messages
 //   swarm-mcp hook stop        (Stop)        block stopping while the swarm still needs this agent
 
 import fs from "node:fs";
 import path from "node:path";
-import { SwarmStore, swarmHome } from "./store.js";
+import { SwarmStore, deliveryText, swarmHome, unreadMessages } from "./store.js";
 
 // The swarm counts as abandoned after this long without any activity; then nobody is held back.
 const QUIET_LIMIT_MS = 2 * 60 * 60_000;
@@ -63,6 +64,28 @@ function recordJoin(input, session) {
   );
 }
 
+/** Unread messages for this conversation's agent, marked read; [] if it isn't in a swarm. */
+async function takeUnread(session) {
+  const file = sessionFile(session);
+  if (!fs.existsSync(file)) return [];
+  const link = JSON.parse(fs.readFileSync(file, "utf8"));
+  const store = new SwarmStore(link.swarm);
+  if (!(await store.view((state) => unreadMessages(state, link.name).length))) return [];
+  return store.update((state) => {
+    const messages = unreadMessages(state, link.name);
+    if (state.agents[link.name]) state.agents[link.name].msgCursor = state.seq.message;
+    return messages;
+  });
+}
+
+// After any tool the agent uses (an edit, a shell command...), hand it messages that arrived meanwhile,
+// so teammates reach it mid-task instead of when it next happens to check the swarm.
+async function deliverMessages(session, event) {
+  const messages = await takeUnread(session);
+  if (!messages.length) return;
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: deliveryText(messages) } }));
+}
+
 async function decideStop(session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return; // this conversation never joined a swarm
@@ -94,6 +117,8 @@ async function decideStop(session) {
   else
     reason = `You are "${agent.name}", a ${agent.role} in swarm "${state.swarm}", and the swarm isn't finished. Don't stop yet: call task_claim to get your next task (it waits until there is one), then do it.`;
   reason += " If the user told you to stop, call swarm_leave first; then you may stop.";
+  const unread = await takeUnread(session);
+  if (unread.length) reason = `${deliveryText(unread)}\n\n${reason}`;
 
   fs.writeFileSync(file, JSON.stringify({ ...link, blockedAt: new Date().toISOString() }));
   process.stdout.write(JSON.stringify({ decision: "block", reason }));
@@ -104,7 +129,10 @@ export async function runHook(kind) {
   const session = pick(input, "session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId");
   if (!session) return;
   try {
-    if (kind === "post-tool") recordJoin(input, session);
+    if (kind === "post-tool") {
+      recordJoin(input, session);
+      await deliverMessages(session, pick(input, "hook_event_name", "hookEventName") || "PostToolUse");
+    }
     else if (kind === "stop") await decideStop(session);
   } catch {
     // A broken hook must never wedge the agent: say nothing, which lets it stop normally.
