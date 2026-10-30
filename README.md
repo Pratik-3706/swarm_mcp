@@ -48,6 +48,20 @@ node src/index.js install --only claude,codex,antigravity-ide    # only some age
 node src/index.js uninstall                                      # remove it everywhere
 ```
 
+### Update
+
+```bash
+npm run update
+```
+
+This pulls the latest version from GitHub, reinstalls dependencies if they changed, and refreshes the setup (MCP registration, hooks, instructions) in the apps where swarm is already installed. It never adds swarm to an app you didn't choose. Restart your agents afterwards.
+
+- `node src/index.js update --check` only says whether there's a newer version.
+- `--no-install` pulls without touching app configs.
+- If you have local changes in the folder, the update is skipped so nothing gets overwritten.
+
+You don't have to remember to check. Each agent's swarm server checks GitHub in the background, at most once a day. When a newer version exists, the manager is told when it joins, and it can tell you or run the update itself. Set `SWARM_NO_UPDATE_CHECK=1` to turn the check off.
+
 ## Use it
 
 Open the same project in each agent and tell them their role.
