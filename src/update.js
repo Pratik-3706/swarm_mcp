@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { swarmHome } from "./store.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ENTRY = path.join(ROOT, "src", "index.js");
+export const ENTRY = path.join(ROOT, "src", "index.js");
 const CHECK_EVERY_MS = 24 * 3600_000;
 const cacheFile = () => path.join(swarmHome(), "update-check.json");
 
@@ -110,7 +110,7 @@ export function updateNotice() {
   try {
     const last = JSON.parse(fs.readFileSync(cacheFile(), "utf8"));
     if (!last.behind || last.head !== git("rev-parse", "HEAD")) return "";
-    return `Note: a newer swarm-mcp is available (${last.behind} new commit${last.behind > 1 ? "s" : ""}). Tell the user, or update it yourself by running: node "${ENTRY.replace(/\\/g, "/")}" update`;
+    return `Note: a newer swarm-mcp is available (${last.behind} new commit${last.behind > 1 ? "s" : ""}). Install it with swarm_update(apply=true) (or run: node "${ENTRY.replace(/\\/g, "/")}" update), then tell the user to restart the agents.`;
   } catch {
     return "";
   }

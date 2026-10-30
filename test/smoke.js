@@ -133,6 +133,9 @@ try {
   await mgr.call("message_send", { to: "codex", content: "FYI: CI is green", expect_reply: false });
   assert.match(await codex.call("task_claim", { wait_seconds: 0 }), /FYI: CI is green[\s\S]*No reply needed|No task for you yet/);
 
+  // Only the manager may apply an update (checking needs the network, so it's tried by hand, not here).
+  await assert.rejects(codex.call("swarm_update", { apply: true }), /Only the manager applies updates/);
+
   // A second manager gets told to join as a worker.
   assert.match(await codex.call("swarm_join", { name: "codex", role: "manager" }), /WARNING: manager is already the manager/);
   await codex.call("swarm_join", { name: "codex", role: "worker", client: "Codex" });

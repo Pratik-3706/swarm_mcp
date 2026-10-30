@@ -60,7 +60,9 @@ This pulls the latest version from GitHub, reinstalls dependencies if they chang
 - `--no-install` pulls without touching app configs.
 - If you have local changes in the folder, the update is skipped so nothing gets overwritten.
 
-You don't have to remember to check. Each agent's swarm server checks GitHub in the background, at most once a day. When a newer version exists, the manager is told when it joins, and it can tell you or run the update itself. Set `SWARM_NO_UPDATE_CHECK=1` to turn the check off.
+Agents can do this too, with the `swarm_update` tool. Any agent can check. The manager can install with `swarm_update(apply=true)`, so it works even in apps without a terminal.
+
+You don't have to remember to check. Each agent's swarm server checks GitHub in the background, at most once a day. When a newer version exists, the manager is told when it joins, and it can tell you or install it with `swarm_update`. Set `SWARM_NO_UPDATE_CHECK=1` to turn the check off.
 
 ## Use it
 
@@ -149,6 +151,7 @@ Each swarm has a name (default `default`). Use a different one per project, for 
 | `note_set` / `note_get` | Shared notes |
 | `file_lock` | Lock, unlock or list advisory file locks. Locking a held file waits until it's free. Locks are released when the task is done, or when their holder has been inactive for 10 minutes |
 | `swarm_finish` | Manager only: end the swarm and tell everyone to stop. A new task reopens it |
+| `swarm_update` | Check GitHub for a newer swarm-mcp. With `apply=true` (manager only), install it, the same as `npm run update` |
 | `swarm_leave` / `swarm_reset` | Go offline / wipe the swarm |
 
 ## Staying in the swarm

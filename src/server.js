@@ -3,7 +3,8 @@ import { z } from "zod";
 import { SwarmStore, TASK_STATUSES, deliveryText, owedReplies, pushEvent, replyRequiredText, unreadMessages } from "./store.js";
 import { PLAYBOOKS, SERVER_INSTRUCTIONS, managerPrompt, workerPrompt, reviewerPrompt } from "./prompts.js";
 import { recordWait, waitPolicy } from "./waits.js";
-import { updateNotice } from "./update.js";
+import { execFile } from "node:child_process";
+import { ENTRY as UPDATE_ENTRY, updateNotice } from "./update.js";
 
 const ACTIVE_WINDOW_MS = 10 * 60_000;
 // No task and not waiting for one for this long: the agent has most likely ended its turn.
@@ -904,6 +905,35 @@ export function createServer() {
         return `Swarm "${state.swarm}" is finished and everyone was told to stop.${open.length ? ` Note: ${ids(open)} ${open.length > 1 ? "were" : "was"} still open.` : ""} Now report to the user.`;
       });
       return text(out);
+    }),
+  );
+
+  server.registerTool(
+    "swarm_update",
+    {
+      title: "Update swarm-mcp",
+      description:
+        "Check GitHub for a newer swarm-mcp, or (manager only, apply=true) install it: pulls the latest version, reinstalls dependencies if needed, and refreshes the setup in every app where swarm is installed. Agents keep running the version they started with until their app restarts or a new chat starts, so tell the user to restart them after applying.",
+      inputSchema: { apply: z.boolean().optional().describe("false (default): only check. true: update now (manager only).") },
+    },
+    tool(async ({ apply }, s) => {
+      if (apply) {
+        const role = await s.store.view((state) => member(state, s.name).role.toLowerCase());
+        if (role !== "manager") return fail("Only the manager applies updates, so workers don't drop their tasks. Tell the manager a newer version is available.");
+      }
+      // A separate process: in MCP mode this process's stdout carries the protocol, and the update prints.
+      const run = (args) =>
+        new Promise((resolve) =>
+          execFile(process.execPath, [UPDATE_ENTRY, "update", ...args], { timeout: 10 * 60_000, windowsHide: true }, (err, stdout, stderr) =>
+            resolve({ ok: !err, out: `${stdout}${stderr}`.trim() || String(err?.message || "") }),
+          ),
+        );
+      const r = await run(apply ? [] : ["--check"]);
+      if (!r.ok) return fail(r.out);
+      if (!apply) return text(/newer swarm-mcp is available/.test(r.out) ? `${r.out}\n\nThe manager can install it with swarm_update(apply=true).` : r.out);
+      if (/Updated swarm-mcp/.test(r.out))
+        await s.store.update((state) => pushEvent(state, s.name, "update", `${s.name} updated swarm-mcp; agents load it after their app restarts`));
+      return text(r.out.replace(/node "[^"]+" update/g, "swarm_update(apply=true)"));
     }),
   );
 
