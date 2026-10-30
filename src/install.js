@@ -143,6 +143,25 @@ function editClaudeCode(remove, dryRun) {
 
 export const AGENT_IDS = ["claude", "codex", ...JSON_TARGETS.map((t) => t.id)];
 
+/** Agents that already have swarm registered, so an update refreshes those and adds nothing new. */
+export function installedAgents() {
+  const ids = [];
+  try {
+    if (has("claude")) claude("mcp", "get", SERVER_NAME), ids.push("claude");
+  } catch {
+    // not registered in Claude Code
+  }
+  if (fs.existsSync(CODEX_CONFIG) && fs.readFileSync(CODEX_CONFIG, "utf8").includes(`[mcp_servers.${SERVER_NAME}]`)) ids.push("codex");
+  for (const t of JSON_TARGETS) {
+    try {
+      if (JSON.parse(fs.readFileSync(t.file, "utf8")).mcpServers?.[SERVER_NAME]) ids.push(t.id);
+    } catch {
+      // missing or unreadable config: not installed there
+    }
+  }
+  return ids;
+}
+
 export function runInstall({ remove = false, dryRun = false, only = null, hooks = true, instructions = true } = {}) {
   // "antigravity ide", "antigravity-ide" and "antigravityide" all mean the same agent.
   const squash = (s) => s.toLowerCase().replace(/[\s_-]+/g, "");

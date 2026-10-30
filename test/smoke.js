@@ -16,7 +16,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function agent(name) {
   const client = new Client({ name, version: "1.0.0" });
   // SWARM_IDLE_SECONDS=2 so "this agent has stopped" shows up without waiting 90s.
-  const env = { ...process.env, SWARM_MCP_HOME: home, SWARM_IDLE_SECONDS: "2" };
+  const env = { ...process.env, SWARM_MCP_HOME: home, SWARM_IDLE_SECONDS: "2", SWARM_NO_UPDATE_CHECK: "1" };
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry], env }));
   const call = async (tool, args = {}) => {
     const r = await client.callTool({ name: tool, arguments: args });

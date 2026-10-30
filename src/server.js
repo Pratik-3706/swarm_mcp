@@ -3,6 +3,7 @@ import { z } from "zod";
 import { SwarmStore, TASK_STATUSES, deliveryText, pushEvent, unreadMessages } from "./store.js";
 import { PLAYBOOKS, SERVER_INSTRUCTIONS, managerPrompt, workerPrompt, reviewerPrompt } from "./prompts.js";
 import { recordWait, waitPolicy } from "./waits.js";
+import { updateNotice } from "./update.js";
 
 const ACTIVE_WINDOW_MS = 10 * 60_000;
 // No task and not waiting for one for this long: the agent has most likely ended its turn.
@@ -376,6 +377,8 @@ export function createServer() {
             `WARNING: ${r.managers.join(", ")} is already the manager of this swarm. Unless the user asked for two managers, call swarm_join again with role="worker".`,
           );
         parts.push(r.summary, `Unread messages: ${r.unread}`, PLAYBOOKS[role]);
+        const notice = updateNotice();
+        if (notice && role === "manager") parts.splice(1, 0, notice); // workers shouldn't wander off to update mid-swarm
         if (role === "worker")
           parts.push(
             r.mine.length

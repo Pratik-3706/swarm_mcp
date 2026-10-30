@@ -4,6 +4,7 @@
 //   swarm-mcp                 run the MCP server over stdio (what agents launch)
 //   swarm-mcp install         register with Claude Code, Codex, Antigravity, Cursor, ...
 //   swarm-mcp uninstall       remove those registrations
+//   swarm-mcp update [--check] pull the latest version from GitHub and refresh the installed apps
 //   swarm-mcp status [--watch] [--swarm name]   show the board in a terminal
 //   swarm-mcp reset  [--swarm name]             wipe a swarm
 //   swarm-mcp call <tool> --as <name> [json]    run a swarm tool from a shell (no MCP needed)
@@ -12,9 +13,10 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer, summarize } from "./server.js";
 import { SwarmStore, listSwarms } from "./store.js";
-import { runInstall } from "./install.js";
+import { installedAgents, runInstall } from "./install.js";
 import { runCall } from "./cli.js";
 import { runHook } from "./hook.js";
+import { checkForUpdatesInBackground, runUpdate } from "./update.js";
 
 const [cmd, ...rest] = process.argv.slice(2);
 const flag = (name) => rest.includes(`--${name}`);
@@ -35,18 +37,31 @@ switch (cmd) {
   case "serve": {
     const server = createServer();
     await server.connect(new StdioServerTransport());
+    checkForUpdatesInBackground();
     break;
   }
+  case "update":
+    runUpdate({ check: flag("check"), install: !flag("no-install") });
+    break;
   case "install":
-  case "uninstall":
+  case "uninstall": {
+    let only = option("only")?.toLowerCase().split(",").map((s) => s.replace(/\s+/g, ""));
+    if (flag("installed")) {
+      only = installedAgents();
+      if (!only.length) {
+        console.log("swarm isn't installed in any app yet. Run: node src/index.js install");
+        break;
+      }
+    }
     runInstall({
       remove: cmd === "uninstall",
       dryRun: flag("dry-run"),
-      only: option("only")?.toLowerCase().split(",").map((s) => s.replace(/\s+/g, "")),
+      only,
       hooks: !flag("no-hooks"),
       instructions: !flag("no-instructions"),
     });
     break;
+  }
   case "call":
     await runCall(rest);
     break;
@@ -73,7 +88,7 @@ switch (cmd) {
     break;
   default:
     console.log(
-      "Usage: swarm-mcp [serve | install [--dry-run] [--only claude,codex,antigravity-ide,...] [--no-hooks] [--no-instructions] | uninstall | status [--watch] [--swarm name] | reset [--swarm name] | call <tool> --as <name> [--role r] [--swarm s] ['<json>'] | hook post-tool|stop]",
+      "Usage: swarm-mcp [serve | update [--check] [--no-install] | install [--installed] [--dry-run] [--only claude,codex,antigravity-ide,...] [--no-hooks] [--no-instructions] | uninstall | status [--watch] [--swarm name] | reset [--swarm name] | call <tool> --as <name> [--role r] [--swarm s] ['<json>'] | hook post-tool|stop]",
     );
     process.exit(cmd === "help" || cmd === "--help" ? 0 : 1);
 }

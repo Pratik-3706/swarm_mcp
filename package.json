@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "setup": "npm install && node src/index.js install",
     "status": "node src/index.js status --watch",
-    "test": "node test/smoke.js && node test/hooks.js"
+    "test": "node test/smoke.js && node test/hooks.js",
+    "update": "node src/index.js update"
   },
   "keywords": [
     "mcp",
