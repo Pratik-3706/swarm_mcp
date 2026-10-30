@@ -1,0 +1,79 @@
+#!/usr/bin/env node
+// swarm-mcp — let multiple AI coding agents collaborate through one MCP server.
+//
+//   swarm-mcp                 run the MCP server over stdio (what agents launch)
+//   swarm-mcp install         register with Claude Code, Codex, Antigravity, Cursor, ...
+//   swarm-mcp uninstall       remove those registrations
+//   swarm-mcp status [--watch] [--swarm name]   show the board in a terminal
+//   swarm-mcp reset  [--swarm name]             wipe a swarm
+//   swarm-mcp call <tool> --as <name> [json]    run a swarm tool from a shell (no MCP needed)
+//   swarm-mcp hook post-tool|stop               Stop-hook helper for apps with Claude-style hooks
+
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createServer, summarize } from "./server.js";
+import { SwarmStore, listSwarms } from "./store.js";
+import { runInstall } from "./install.js";
+import { runCall } from "./cli.js";
+import { runHook } from "./hook.js";
+
+const [cmd, ...rest] = process.argv.slice(2);
+const flag = (name) => rest.includes(`--${name}`);
+const option = (name) => {
+  const i = rest.indexOf(`--${name}`);
+  return i >= 0 ? rest[i + 1] : undefined;
+};
+
+async function printStatus(swarm) {
+  const store = new SwarmStore(swarm);
+  const state = await store.view();
+  const recent = state.events.slice(-12).map((e) => `  ${e.at.slice(11, 19)} ${e.text}`);
+  return `${summarize(state, null)}\n\nRecent activity:\n${recent.join("\n") || "  (none)"}`;
+}
+
+switch (cmd) {
+  case undefined:
+  case "serve": {
+    const server = createServer();
+    await server.connect(new StdioServerTransport());
+    break;
+  }
+  case "install":
+  case "uninstall":
+    runInstall({
+      remove: cmd === "uninstall",
+      dryRun: flag("dry-run"),
+      only: option("only")?.toLowerCase().split(",").map((s) => s.replace(/\s+/g, "")),
+      hooks: !flag("no-hooks"),
+      instructions: !flag("no-instructions"),
+    });
+    break;
+  case "call":
+    await runCall(rest);
+    break;
+  case "hook":
+    await runHook(rest[0]);
+    break;
+  case "status": {
+    const swarm = option("swarm") || "default";
+    if (!flag("watch")) {
+      console.log(await printStatus(swarm));
+      const others = listSwarms().filter((s) => s !== swarm);
+      if (others.length) console.log(`\nOther swarms: ${others.join(", ")} (use --swarm <name>)`);
+      break;
+    }
+    for (;;) {
+      const out = await printStatus(swarm);
+      process.stdout.write(`\x1b[2J\x1b[H${out}\n\n(refreshing every 2s — Ctrl+C to exit)\n`);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  case "reset":
+    await new SwarmStore(option("swarm") || "default").reset();
+    console.log(`Swarm "${option("swarm") || "default"}" reset.`);
+    break;
+  default:
+    console.log(
+      "Usage: swarm-mcp [serve | install [--dry-run] [--only claude,codex,antigravity-ide,...] [--no-hooks] [--no-instructions] | uninstall | status [--watch] [--swarm name] | reset [--swarm name] | call <tool> --as <name> [--role r] [--swarm s] ['<json>'] | hook post-tool|stop]",
+    );
+    process.exit(cmd === "help" || cmd === "--help" ? 0 : 1);
+}

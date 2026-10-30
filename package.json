@@ -1,0 +1,41 @@
+{
+  "name": "swarm-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that lets multiple AI coding agents (Claude Code, Codex, Antigravity, Cursor...) collaborate on one task: shared task board, messages, notes and file locks.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "setup": "npm install && node src/index.js install",
+    "status": "node src/index.js status --watch",
+    "test": "node test/smoke.js && node test/hooks.js"
+  },
+  "keywords": [
+    "mcp",
+    "multi-agent",
+    "claude-code",
+    "codex",
+    "antigravity",
+    "agents"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "bin": {
+    "swarm-mcp": "src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pratik-3706/swarm_mcp.git"
+  },
+  "homepage": "https://github.com/Pratik-3706/swarm_mcp#readme"
+}

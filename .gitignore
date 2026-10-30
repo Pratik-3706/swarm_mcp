@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Logs and debug output
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Installer backups and temp files (the installer writes *.swarm-backup next to configs it edits)
+*.swarm-backup
+*.tmp
+out.txt
+
+# Swarm state, if someone points SWARM_MCP_HOME inside the repo
+.swarm-mcp/
+
+# Environment and secrets
+.env
+.env.*
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Coverage / build output
+coverage/
+dist/
+*.tgz
