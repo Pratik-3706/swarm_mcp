@@ -45,11 +45,16 @@ export function runUpdate({ check = false, install = true } = {}) {
   const pending = git("log", "--format=  %h %s", "HEAD..@{u}");
   if (check) return console.log(`A newer swarm-mcp is available (${behind} new commit${behind > 1 ? "s" : ""}):\n${pending}\nRun: node "${ENTRY}" update`);
 
-  if (git("status", "--porcelain", "--untracked-files=no")) {
-    console.log(`You have local changes in ${ROOT}, so the update was skipped. Commit or stash them, then run update again.`);
+  // npm install rewrites package-lock.json by itself; that isn't a local change worth keeping.
+  const edited = git("status", "--porcelain", "--untracked-files=no")
+    .split("\n")
+    .filter((l) => l && !l.endsWith("package-lock.json"));
+  if (edited.length) {
+    console.log(`You have local changes in ${ROOT}, so the update was skipped. Commit or stash them, then run update again:\n${edited.join("\n")}`);
     process.exitCode = 1;
     return;
   }
+  git("checkout", "--", "package-lock.json");
   const before = git("rev-parse", "HEAD");
   git("merge", "--ff-only", "--quiet", "@{u}");
   console.log(`Updated swarm-mcp to ${git("rev-parse", "--short", "HEAD")}:\n${pending}`);
