@@ -102,6 +102,31 @@ That's all. The server tells each agent its playbook when it joins:
 
 In Claude Code the prompts are also slash commands: `/mcp__swarm__manager`, `/mcp__swarm__worker`, `/mcp__swarm__reviewer`.
 
+### How much is done?
+
+Ask the manager *"how's it going?"*. It calls `swarm_report`, which gives a plain-English status:
+- overall % done
+- who's working on what, with % done and time left
+- what needs attention
+- what finished recently, and what's next
+
+For a live view, open the dashboard:
+
+```bash
+npm run dashboard
+```
+
+You can also ask the manager to *"open the dashboard"*. It's a page on your own computer (127.0.0.1) that refreshes every 2 seconds. It shows overall progress, every task with its status, progress bar and ETA, each agent's state and current task, who owes a reply, file locks, alerts, and recent activity. `npm run report` prints the same status as `swarm_report` in a terminal.
+
+### Projects, rounds and stalled work
+
+- **One project per board.** Agents pass `project` (the folder they work in) when they join. The manager's folder becomes the swarm's project. A worker in a different folder is warned to work in the right one.
+- **Fresh rounds.** When the manager starts a goal in a different project folder, or a new goal after the swarm finished, the old round closes on its own: open tasks are cancelled, notes are archived, and locks and pending replies are cleared. So nobody picks up the previous project's work. A different goal in the same folder only gets a warning. The manager confirms with `new_round=true`, so a restarted manager can't wipe a live board by accident.
+- **One manager.** A second agent joining as manager is refused unless it passes `force=true`, which it should only do if you asked for two managers.
+- **Progress heartbeat.** Workers post `task_update(progress=…, eta=…)` about every 10 minutes and get a reminder if they forget.
+- **Auto-return.** A task whose holder has been silent for 20 minutes goes back on the board for anyone to claim, and the holder is told. With the hooks, any tool use counts as activity, so an agent busy editing never loses its task.
+- **Changed files.** When a task is marked done or sent to review, the files it changed are recorded in its result. These come from its own file locks plus what git saw change since the task was claimed. Reviewers and the report show them.
+
 ### Agents without the MCP tools
 
 Most apps load MCP servers only when they start. If you ask an agent to join before restarting its app, or the agent has a shell but no MCP support, it can run every swarm tool from the shell. Each call behaves exactly like the MCP tool:
@@ -140,12 +165,13 @@ Each swarm has a name (default `default`). Use a different one per project, for 
 
 | Tool | What it does |
 |---|---|
-| `swarm_join` | Join with a name and role; returns the team, the board and your playbook |
+| `swarm_join` | Join with a name, role and `project` folder; returns the team, the board and your playbook. Managers pass `goal`, and `new_round` to close a previous goal's leftovers |
+| `swarm_report` | Plain-English status for the user. `dashboard=true` also opens the live dashboard |
 | `swarm_status` | Overview of agents, tasks, locks, notes |
 | `task_create` | Add tasks (batch), with `assignee`, `priority`, `depends_on` (`"$1"` = first task in the batch) |
 | `task_list` | Task details, filtered by status, assignee or id |
 | `task_claim` | Take the best available task (or a specific one). Waits for one if there's none yet. One task at a time |
-| `task_update` | Status (`todo / in_progress / blocked / review / done / cancelled`), notes, result, reassign |
+| `task_update` | Status (`todo / in_progress / blocked / review / done / cancelled`), `progress` %, `eta`, notes, result, reassign. Changed files are recorded on done/review |
 | `message_send` | Message an agent, a role (`manager`, `worker`), a list, or `all`. Recipients must reply (`reply_to`) before they can go on, unless `expect_reply=false` |
 | `swarm_inbox` | Unread messages and board activity. Waits until something arrives |
 | `note_set` / `note_get` | Shared notes |
@@ -213,6 +239,9 @@ Optional env vars:
 - `SWARM_MCP_HOME`: where state is stored (default `~/.swarm-mcp`).
 - `SWARM_WAIT_SECONDS`: a fixed wait for `task_claim`, `swarm_inbox` and `file_lock`, which turns off the learning. The shell fallback uses 90s by default. `SWARM_MAX_WAIT_SECONDS`: the most it will ever learn (1800).
 - `SWARM_IDLE_SECONDS`: how long an agent with no task and no wait counts as active before it's shown as stopped (90).
+- `SWARM_REASSIGN_MINUTES`: how long a task holder can be silent before its task goes back on the board (20).
+- `SWARM_HEARTBEAT_MINUTES`: how often workers are reminded to post progress (10).
+- `SWARM_NO_UPDATE_CHECK=1`: turn off the daily update check.
 - `SWARM_CLIENT`: the client's display name. By default it's the name the client sends when it connects.
 
 ## Notes
@@ -238,5 +267,11 @@ npm test
   - the Stop hook: who it holds back, the loop guard, and `swarm_leave` / `swarm_finish`
   - that messages are injected after any tool use, and when stopping
   - that other tools are blocked until the agent replies, while swarm tools stay allowed
-- The smoke test also checks that an agent can't claim or update anything until it replies, that replies and `expect_reply=false` notices block nobody, and that `swarm_status` shows who owes a reply.
+- `test/board.js` runs against a throwaway git project, with the timers cut to seconds. It checks:
+  - the project folder warning
+  - fresh rounds (warning only, `new_round`, and a new folder)
+  - progress and ETA, the heartbeat reminder, and auto-return of a silent agent's task
+  - changed-file tracking, which ignores a file edited before the task started
+  - `swarm_report`, and the dashboard's page and data
+- The smoke test also checks the single-manager guard, that an agent can't claim or update anything until it replies, that replies and `expect_reply=false` notices block nobody, and that `swarm_status` shows who owes a reply.
   - that the installer adds hooks and instructions without touching your own settings, and removes them cleanly

@@ -7,8 +7,10 @@
     "start": "node src/index.js",
     "setup": "npm install && node src/index.js install",
     "status": "node src/index.js status --watch",
-    "test": "node test/smoke.js && node test/hooks.js",
-    "update": "node src/index.js update"
+    "test": "node test/smoke.js && node test/hooks.js && node test/board.js",
+    "update": "node src/index.js update",
+    "dashboard": "node src/index.js dashboard",
+    "report": "node src/index.js report"
   },
   "keywords": [
     "mcp",

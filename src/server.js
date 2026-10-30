@@ -5,6 +5,19 @@ import { PLAYBOOKS, SERVER_INSTRUCTIONS, managerPrompt, workerPrompt, reviewerPr
 import { recordWait, waitPolicy } from "./waits.js";
 import { execFile } from "node:child_process";
 import { ENTRY as UPDATE_ENTRY, updateNotice } from "./update.js";
+import { ensureDashboard } from "./dashboard.js";
+import {
+  HEARTBEAT_MS,
+  baseCommit,
+  changedFiles,
+  heartbeatDue,
+  heartbeatText,
+  isWaiting,
+  projectPath,
+  returnStalledTasks,
+  sameProject,
+  startRound,
+} from "./board.js";
 
 const ACTIVE_WINDOW_MS = 10 * 60_000;
 // No task and not waiting for one for this long: the agent has most likely ended its turn.
@@ -26,13 +39,15 @@ function fmtTask(t) {
   const who = t.assignee ? ` @${t.assignee}` : " (unassigned)";
   const deps = t.dependsOn?.length ? ` deps:${t.dependsOn.map((d) => `#${d}`).join(",")}` : "";
   const prio = t.priority && t.priority !== "normal" ? ` !${t.priority}` : "";
-  return `#${t.id} [${t.status}]${prio} ${t.title}${who}${deps}`;
+  const progress = t.status === "in_progress" && t.progress != null ? ` ${t.progress}%${t.eta ? `, eta ${t.eta}` : ""}` : "";
+  return `#${t.id} [${t.status}${progress}]${prio} ${t.title}${who}${deps}`;
 }
 
 function fmtTaskFull(t) {
   const lines = [fmtTask(t)];
   if (t.description) lines.push(`  description: ${t.description}`);
   if (t.result) lines.push(`  result: ${t.result}`);
+  if (t.files?.length) lines.push(`  files changed: ${t.files.join(", ")}`);
   for (const n of t.notes || []) lines.push(`  note (${n.by}, ${n.at}): ${n.text}`);
   return lines.join("\n");
 }
@@ -46,7 +61,6 @@ function isActive(agent) {
   return agent.status !== "offline" && Date.now() - Date.parse(agent.lastSeen) < ACTIVE_WINDOW_MS;
 }
 
-const isWaiting = (agent) => !!agent.waitingUntil && Date.parse(agent.waitingUntil) > Date.now();
 
 /** Not waiting, not holding a task, and quiet: it won't notice new work until its user nudges it. */
 function seemsStopped(state, a) {
@@ -136,6 +150,101 @@ function inboxFor(state, me) {
   return { messages, events };
 }
 
+const ago = (iso) => {
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60_000);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+};
+
+/** The board as plain data, for the dashboard and swarm_report. */
+export function snapshot(state) {
+  const live = state.tasks.filter((t) => t.status !== "cancelled");
+  const count = (s) => live.filter((t) => t.status === s).length;
+  const credit = { done: 100, review: 90 };
+  const percent = live.length
+    ? Math.round(live.reduce((n, t) => n + (credit[t.status] ?? (t.status === "in_progress" ? t.progress || 0 : 0)), 0) / live.length)
+    : 0;
+  return {
+    swarm: state.swarm,
+    goal: state.goal,
+    project: state.project || null,
+    round: state.round || 1,
+    finished: !!state.finishedAt,
+    updatedAt: state.events.at(-1)?.at || state.createdAt,
+    totals: { tasks: live.length, done: count("done"), review: count("review"), inProgress: count("in_progress"), todo: count("todo"), blocked: count("blocked"), percent },
+    agents: Object.values(state.agents).map((a) => {
+      const t = state.tasks.find((x) => x.assignee === a.name && x.status === "in_progress");
+      return {
+        name: a.name,
+        role: a.role,
+        client: a.client,
+        state: agentState(state, a),
+        lastSeen: a.lastSeen,
+        owes: owedReplies(state, a.name).map((m) => m.id),
+        task: t && { id: t.id, title: t.title, progress: t.progress ?? 0, eta: t.eta, progressAt: t.progressAt },
+      };
+    }),
+    tasks: state.tasks.map((t) => ({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      assignee: t.assignee,
+      priority: t.priority,
+      progress: t.status === "done" ? 100 : t.progress ?? 0,
+      eta: t.status === "in_progress" ? t.eta : null,
+      dependsOn: t.dependsOn,
+      waitingOnDeps: t.status === "todo" && !depsDone(state, t),
+      result: t.result,
+      files: t.files || [],
+      lastNote: t.notes.at(-1)?.text || null,
+      updatedAt: t.updatedAt,
+    })),
+    locks: Object.entries(state.locks).map(([p, l]) => ({ path: p, by: l.by, taskId: l.taskId })),
+    alerts: stallAlerts(state, null).map((x) => x.text),
+    activity: state.events.slice(-40).reverse().map((e) => ({ at: e.at, text: e.text })),
+  };
+}
+
+/** A status the manager can paste straight to the user. */
+export function reportText(state) {
+  const s = snapshot(state);
+  const { totals: n } = s;
+  const out = [`Goal: ${s.goal || "(none set yet)"}${s.project ? ` (in ${s.project})` : ""}${s.finished ? ". The swarm is finished." : ""}`];
+  if (!n.tasks) out.push("No tasks yet.");
+  else {
+    const rest = [n.inProgress && `${n.inProgress} in progress`, n.review && `${n.review} in review`, n.todo && `${n.todo} not started`, n.blocked && `${n.blocked} blocked`].filter(Boolean);
+    out.push(`Progress: about ${n.percent}% overall. ${n.done} of ${n.tasks} task${n.tasks > 1 ? "s" : ""} done${rest.length ? `, ${rest.join(", ")}` : ""}.`);
+  }
+  if (s.agents.length) {
+    out.push("", "Team:");
+    for (const a of s.agents) {
+      const doing = a.task
+        ? `working on #${a.task.id} "${a.task.title}", ${a.task.progress}% done${a.task.eta ? `, about ${a.task.eta} left` : ""} (last update ${ago(a.task.progressAt)})`
+        : a.state;
+      out.push(`- ${a.name} (${a.role}${a.client ? `, ${a.client}` : ""}): ${doing}${a.owes.length ? `; owes a reply to message ${a.owes.map((i) => `#${i}`).join(", ")}` : ""}`);
+    }
+  }
+  const attention = [...s.alerts, ...s.tasks.filter((t) => t.status === "blocked").map((t) => `#${t.id} "${t.title}" is blocked${t.lastNote ? `: ${t.lastNote}` : ""}`)];
+  if (attention.length) out.push("", "Needs attention:", ...attention.map((x) => `- ${x}`));
+  const finished = s.tasks
+    .filter((t) => t.status === "done" || t.status === "review")
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, 5);
+  if (finished.length) {
+    out.push("", "Recently finished:");
+    for (const t of finished) {
+      const summary = t.result ? `: ${t.result.split("\n")[0].slice(0, 160)}` : "";
+      out.push(`- #${t.id} "${t.title}"${t.assignee ? ` by ${t.assignee}` : ""}${t.status === "review" ? " (awaiting review)" : ""}${summary}${t.files.length ? ` [${t.files.length} file${t.files.length > 1 ? "s" : ""}]` : ""}`);
+    }
+  }
+  const next = s.tasks.filter((t) => t.status === "todo").slice(0, 5);
+  if (next.length) {
+    out.push("", "Up next:");
+    for (const t of next)
+      out.push(`- #${t.id} "${t.title}" (${t.assignee ? `for ${t.assignee}` : "open to any worker"}${t.waitingOnDeps ? `, waiting on ${t.dependsOn.map((d) => `#${d}`).join(", ")}` : ""})`);
+  }
+  return out.join("\n");
+}
+
 /** Unread messages for me, marked read. */
 function takeMessages(state, me) {
   const { messages } = inboxFor(state, me);
@@ -183,11 +292,20 @@ export function createServer() {
   // Identity of the agent behind this stdio connection.
   const session = { store: null, name: null };
 
-  async function join({ name, role, swarm, client, about, goal }) {
+  async function join({ name, role, swarm, client, about, goal, project, new_round, force }) {
     const store = new SwarmStore(swarm || process.env.SWARM_NAME || "default");
     name = name.trim().toLowerCase().replace(/\s+/g, "-");
+    project = projectPath(project);
+    const isManager = role.toLowerCase() === "manager";
     const result = await store.update((state) => {
       const existing = state.agents[name];
+      const managers = Object.values(state.agents)
+        .filter((a) => a.name !== name && a.role.toLowerCase() === "manager" && isActive(a))
+        .map((a) => a.name);
+      if (isManager && managers.length && !force)
+        throw new Error(
+          `${managers.join(", ")} is already the manager of this swarm, and a swarm has one manager. Join as a worker instead: swarm_join(name="${name}", role="worker"). Only if the user explicitly asked for a second manager, pass force=true.`,
+        );
       state.agents[name] = {
         name,
         role,
@@ -201,20 +319,44 @@ export function createServer() {
         eventCursor: existing?.eventCursor ?? state.seq.event,
         alerted: existing?.alerted || [],
       };
-      if (goal) {
-        state.goal = goal;
-        delete state.finishedAt; // a manager with a goal starts a new round
+      // A manager's goal decides whether this is a new round. Old open tasks and notes are closed when the
+      // project folder changed, the swarm had finished, or the manager says so (new_round). Merely different
+      // wording of the goal only gets a warning, so a restarted manager can't wipe a live board by accident.
+      const notices = [];
+      const open = state.tasks.filter((t) => !["done", "cancelled"].includes(t.status));
+      if (isManager && goal) {
+        const otherProject = project && state.project && !sameProject(project, state.project);
+        const hadBoard = state.goal || state.tasks.length || Object.keys(state.notes).length;
+        if (hadBoard && (new_round || otherProject || (state.finishedAt && goal !== state.goal))) {
+          const r = startRound(state, name, goal, project);
+          notices.push(
+            `Started a fresh round for this goal${otherProject ? " (different project folder)" : ""}. Closed ${r.closed} open task(s) and archived ${r.notes} note(s) from the previous goal "${r.previous || "none"}", so nobody picks them up.`,
+          );
+        } else {
+          if (goal !== state.goal && open.length)
+            notices.push(
+              `WARNING: the board still has ${open.length} open task(s) from the previous goal "${state.goal}". If this is a new project or a new round, call swarm_join again with new_round=true to close them. If you are continuing that work, ignore this.`,
+            );
+          state.goal = goal;
+          if (project) state.project = project;
+          delete state.finishedAt;
+        }
+      } else if (isManager && project && !state.project) state.project = project;
+      if (state.project && !isManager) {
+        if (project && !sameProject(project, state.project))
+          notices.push(
+            `WARNING: this swarm's project folder is ${state.project}, but you are in ${project}. Do all your work in ${state.project}; if that's wrong, ask the manager before touching any files.`,
+          );
+        else notices.push(`Project folder: ${state.project}. Do all your work inside it.`);
       }
       // Rejoining under the same role (a restarted app, or each call of the shell fallback) is not news.
       if (!existing || existing.role !== role || existing.status === "offline")
         pushEvent(state, name, "join", `${name} ${existing ? "rejoined" : "joined"} as ${role}`);
       return {
         rejoined: !!existing,
+        notices,
         summary: summarize(state, name),
         unread: inboxFor(state, name).messages.length,
-        managers: Object.values(state.agents)
-          .filter((a) => a.name !== name && a.role.toLowerCase() === "manager" && isActive(a))
-          .map((a) => a.name),
         mine: state.tasks.filter((t) => t.assignee === name && t.status === "in_progress"),
       };
     });
@@ -255,12 +397,25 @@ export function createServer() {
     });
 
   // Messages reach a busy agent with whatever swarm call it makes next, not only via swarm_inbox.
+  // ...along with a nudge to post progress when its task has gone quiet (see heartbeatDue).
   async function withMessages(s, result) {
     if (result.isError || !s.store) return result;
     try {
-      if (!(await s.store.view((state) => unreadMessages(state, s.name).length))) return result;
-      const messages = await s.store.update((state) => (state.agents[s.name] ? takeMessages(state, s.name) : []));
-      return messages.length ? { ...result, content: [...result.content, { type: "text", text: deliveryText(messages) }] } : result;
+      const pending = await s.store.view((state) => unreadMessages(state, s.name).length || heartbeatDue(state, s.name));
+      if (!pending) return result;
+      const extra = await s.store.update((state) => {
+        if (!state.agents[s.name]) return [];
+        const out = [];
+        const messages = takeMessages(state, s.name);
+        if (messages.length) out.push(deliveryText(messages));
+        const due = heartbeatDue(state, s.name);
+        if (due) {
+          state.agents[s.name].heartbeatAskedAt = now();
+          out.push(heartbeatText(due));
+        }
+        return out;
+      });
+      return extra.length ? { ...result, content: [...result.content, ...extra.map((t) => ({ type: "text", text: t }))] } : result;
     } catch {
       return result;
     }
@@ -300,6 +455,7 @@ export function createServer() {
       if (task.assignee && task.assignee !== me) throw new Error(`Task #${taskId} is assigned to ${task.assignee}`);
       if (!depsDone(state, task)) throw new Error(`Task #${taskId} is waiting on dependencies ${task.dependsOn.map((d) => `#${d}`).join(",")}`);
     } else {
+      returnStalledTasks(state); // work held by silent agents becomes claimable again
       task = claimable(state, me)[0];
       if (!task) {
         const messages = takeMessages(state, me);
@@ -309,7 +465,10 @@ export function createServer() {
     }
     task.status = "in_progress";
     task.assignee = me;
-    task.updatedAt = now();
+    task.updatedAt = task.claimedAt = task.progressAt = now();
+    task.progress = 0;
+    task.eta = null;
+    task.baseCommit = baseCommit(state.project); // to find the files this task changed
     pushEvent(state, me, "task_claimed", `${me} started #${task.id} ${task.title}`, { taskId: task.id });
     return workOn(state, me, task, "You claimed");
   }
@@ -323,7 +482,8 @@ export function createServer() {
       deps.length && `Results of dependencies:\n${deps.map((d) => `  #${d.id} ${d.title}: ${d.result}`).join("\n")}`,
       messages.length && `Unread messages:\n${messages.map(fmtMessage).join("\n")}`,
       "Work on your own: don't ask the user for approval and don't wait for them to review a plan, because the manager already assigned this task. If something is unclear, make a sensible choice and say so in your result, or ask the manager with message_send and keep going.",
-      `Lock the files you edit with file_lock(action="lock", paths=[...], task_id=${task.id}). When the work is done and verified, call task_update(task_id=${task.id}, status="done", result="what changed, which files, how to verify"), then call task_claim for your next task.`,
+      state.project && `Project folder: ${state.project}. Work only inside it.`,
+      `Lock the files you edit with file_lock(action="lock", paths=[...], task_id=${task.id}). About every ${Math.round(HEARTBEAT_MS / 60_000)} minutes, post progress: task_update(task_id=${task.id}, progress=<0-100>, eta="<time left, e.g. 15 min>", note="what's done so far"). When the work is done and verified, call task_update(task_id=${task.id}, status="done", result="what changed, how to verify"); the files you changed are recorded automatically. Then call task_claim for your next task.`,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -384,17 +544,19 @@ export function createServer() {
         client: z.string().optional().describe("Which tool you are, e.g. 'Claude Code', 'Codex', 'Antigravity'"),
         about: z.string().optional().describe("One line about your strengths or focus, e.g. 'frontend + tests'"),
         goal: z.string().optional().describe("Managers: the overall goal of the swarm"),
+        project: z
+          .string()
+          .optional()
+          .describe("Absolute path of the project folder you are working in (your current directory). Managers set the swarm's project; workers get warned if theirs differs."),
+        new_round: z.boolean().optional().describe("Managers: start a fresh round for this goal, closing open tasks and notes left from a previous goal"),
+        force: z.boolean().optional().describe("Join as a second manager. Only when the user explicitly asked for that."),
       },
     },
     async (args) => {
       try {
         const r = await join(args);
         const role = PLAYBOOKS[args.role.toLowerCase()] ? args.role.toLowerCase() : "worker";
-        const parts = [`${r.rejoined ? "Rejoined" : "Joined"} as "${session.name}" (${args.role}).`];
-        if (role === "manager" && r.managers.length)
-          parts.push(
-            `WARNING: ${r.managers.join(", ")} is already the manager of this swarm. Unless the user asked for two managers, call swarm_join again with role="worker".`,
-          );
+        const parts = [`${r.rejoined ? "Rejoined" : "Joined"} as "${session.name}" (${args.role}).`, ...r.notices];
         parts.push(r.summary, `Unread messages: ${r.unread}`, PLAYBOOKS[role]);
         const notice = updateNotice();
         if (notice && role === "manager") parts.splice(1, 0, notice); // workers shouldn't wander off to update mid-swarm
@@ -421,6 +583,7 @@ export function createServer() {
     tool(async (_args, s) => {
       const out = await s.store.update((state) => {
         touch(state, s.name);
+        returnStalledTasks(state);
         const unread = inboxFor(state, s.name);
         return `${summarize(state, s.name)}\n\nUnread: ${unread.messages.length} messages, ${unread.events.length} events (call swarm_inbox).`;
       });
@@ -598,18 +761,21 @@ export function createServer() {
     {
       title: "Update a task",
       description:
-        "Change a task's status, add a progress note, record the result, or (re)assign it. Statuses: todo, in_progress, blocked, review, done, cancelled. When finishing, set status 'done' (or 'review' if a reviewer should check it) and put a concise summary in result.",
+        "Change a task's status, post progress (% done and an ETA, about every 10 minutes while you work), add a note, record the result, or (re)assign it. Statuses: todo, in_progress, blocked, review, done, cancelled. When finishing, set status 'done' (or 'review' if a reviewer should check it) and put a concise summary in result; the files the task changed are recorded automatically.",
       inputSchema: {
         task_id: z.number().int(),
         status: z.enum(TASK_STATUSES).optional(),
+        progress: z.number().int().min(0).max(100).optional().describe("Percent done"),
+        eta: z.string().optional().describe('Time left, e.g. "15 min"'),
         note: z.string().optional().describe("Progress note / question / blocker reason"),
         result: z.string().optional().describe("Final summary: what changed, where, how to verify"),
+        files: z.array(z.string()).optional().describe("Files you changed, if you want to list them yourself (otherwise worked out from git and your locks)"),
         assignee: z.string().optional().describe("Reassign; use 'none' to unassign"),
         title: z.string().optional(),
         description: z.string().optional(),
       },
     },
-    gatedTool(async ({ task_id, status, note, result, assignee, title, description }, s) => {
+    gatedTool(async ({ task_id, status, progress, eta, note, result, files, assignee, title, description }, s) => {
       const out = await s.store.update((state) => {
         touch(state, s.name);
         const task = state.tasks.find((t) => t.id === task_id);
@@ -634,6 +800,16 @@ export function createServer() {
           task.notes.push({ by: s.name, at: now(), text: note });
           changes.push(`note: ${note}`);
         }
+        if (progress != null || eta) {
+          if (progress != null) task.progress = progress;
+          if (eta) task.eta = eta;
+          changes.push(`progress ${task.progress ?? 0}%${task.eta ? `, eta ${task.eta}` : ""}`);
+        }
+        if (progress != null || eta || note) task.progressAt = now();
+        if (status === "done") task.progress = 100;
+        // Record what the task touched while its locks still say which files were its own.
+        if (files?.length) task.files = files;
+        else if ((status === "done" || status === "review") && !task.files?.length) task.files = changedFiles(state, task);
         task.updatedAt = now();
         if (status === "done" || status === "cancelled")
           for (const [p, l] of Object.entries(state.locks)) if (l.taskId === task.id) delete state.locks[p];
@@ -742,6 +918,7 @@ export function createServer() {
         wait = (await waitUntil(s, () => s.store.view(pending), wait_seconds, extra)).seconds;
       const out = await s.store.update((state) => {
         const agent = touch(state, s.name);
+        returnStalledTasks(state); // returned tasks show up as activity for the manager
         const { messages, events } = inboxFor(state, s.name);
         const alerts = newAlerts(state);
         agent.msgCursor = state.seq.message;
@@ -905,6 +1082,26 @@ export function createServer() {
         return `Swarm "${state.swarm}" is finished and everyone was told to stop.${open.length ? ` Note: ${ids(open)} ${open.length > 1 ? "were" : "was"} still open.` : ""} Now report to the user.`;
       });
       return text(out);
+    }),
+  );
+
+  server.registerTool(
+    "swarm_report",
+    {
+      title: "Status report for the user",
+      description:
+        'A plain-English status of the swarm (goal, % done, who is doing what with ETAs, what needs attention, what finished recently, what is next) to paste straight to the user when they ask "how is it going?" or "how much is done?". dashboard=true also opens a live dashboard page on the user\'s computer and returns its address.',
+      inputSchema: { dashboard: z.boolean().optional().describe("Also open the live dashboard page for the user") },
+    },
+    tool(async ({ dashboard }, s) => {
+      const report = await s.store.update((state) => {
+        touch(state, s.name);
+        returnStalledTasks(state);
+        return reportText(state);
+      });
+      if (!dashboard) return text(`${report}\n\n(For a live view, call swarm_report(dashboard=true) or run: npm run dashboard)`);
+      const url = await ensureDashboard(s.store.swarm);
+      return text(`${report}\n\n${url ? `Live dashboard: ${url} (opened in the user's browser; it refreshes every 2 seconds).` : "Couldn't start the dashboard; the user can run: npm run dashboard"}`);
     }),
   );
 

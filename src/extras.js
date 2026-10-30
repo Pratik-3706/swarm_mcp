@@ -93,7 +93,7 @@ function instructionsBlock(entry) {
 When the user asks you to join, connect to, manage or work in "the swarm":
 - Use the swarm MCP tools (swarm_join, task_claim, task_update, swarm_inbox, ...) and follow the playbook swarm_join returns.
 - If those tools aren't available in this session (most apps load MCP servers only at startup), don't give up and don't ask the user to start anything: run the same tools from your shell. They behave exactly the same:
-  - \`${run} call swarm_join --as <your-name> --role <worker|manager|reviewer>\`
+  - \`${run} call swarm_join --as <your-name> --role <worker|manager|reviewer> --project "<this project folder>"\`
   - \`${run} call task_claim --as <your-name>\` (waits for work)
   - \`${run} call task_update --as <your-name> --task_id 3 --status done --result "what changed"\`
   - \`${run} call message_send --as <your-name> --reply_to 7 --content "your answer"\`

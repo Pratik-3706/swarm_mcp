@@ -137,7 +137,8 @@ try {
   await assert.rejects(codex.call("swarm_update", { apply: true }), /Only the manager applies updates/);
 
   // A second manager gets told to join as a worker.
-  assert.match(await codex.call("swarm_join", { name: "codex", role: "manager" }), /WARNING: manager is already the manager/);
+  await assert.rejects(codex.call("swarm_join", { name: "codex", role: "manager" }), /manager is already the manager[\s\S]*Join as a worker instead/);
+  assert.match(await codex.call("swarm_join", { name: "codex", role: "manager", force: true }), /Joined|Rejoined/);
   await codex.call("swarm_join", { name: "codex", role: "worker", client: "Codex" });
 
   // Waiting sends progress pings, and a call the client gives up on stops waiting.

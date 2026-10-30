@@ -8,10 +8,13 @@
 //   swarm-mcp status [--watch] [--swarm name]   show the board in a terminal
 //   swarm-mcp reset  [--swarm name]             wipe a swarm
 //   swarm-mcp call <tool> --as <name> [json]    run a swarm tool from a shell (no MCP needed)
-//   swarm-mcp hook post-tool|stop               Stop-hook helper for apps with Claude-style hooks
+//   swarm-mcp hook pre-tool|post-tool|stop    hook helper for apps with Claude-style hooks
+//   swarm-mcp dashboard [--port n] [--swarm s] live board in the browser
+//   swarm-mcp report [--swarm s]                plain-English status
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createServer, summarize } from "./server.js";
+import { createServer, reportText, summarize } from "./server.js";
+import { startDashboard } from "./dashboard.js";
 import { SwarmStore, listSwarms } from "./store.js";
 import { installedAgents, runInstall } from "./install.js";
 import { runCall } from "./cli.js";
@@ -65,6 +68,12 @@ switch (cmd) {
   case "call":
     await runCall(rest);
     break;
+  case "dashboard":
+    await startDashboard({ port: Number(option("port")) || 4777, swarm: option("swarm") || "default", open: !flag("no-open") });
+    break;
+  case "report":
+    console.log(reportText(await new SwarmStore(option("swarm") || "default").view()));
+    break;
   case "hook":
     await runHook(rest[0]);
     break;
@@ -88,7 +97,7 @@ switch (cmd) {
     break;
   default:
     console.log(
-      "Usage: swarm-mcp [serve | update [--check] [--no-install] | install [--installed] [--dry-run] [--only claude,codex,antigravity-ide,...] [--no-hooks] [--no-instructions] | uninstall | status [--watch] [--swarm name] | reset [--swarm name] | call <tool> --as <name> [--role r] [--swarm s] ['<json>'] | hook post-tool|stop]",
+      "Usage: swarm-mcp [serve | update [--check] [--no-install] | install [--installed] [--dry-run] [--only claude,codex,antigravity-ide,...] [--no-hooks] [--no-instructions] | uninstall | status [--watch] [--swarm name] | reset [--swarm name] | call <tool> --as <name> [--role r] [--swarm s] [--arg value] | dashboard [--port n] [--swarm s] [--no-open] | report [--swarm s] | hook pre-tool|post-tool|stop]",
     );
     process.exit(cmd === "help" || cmd === "--help" ? 0 : 1);
 }

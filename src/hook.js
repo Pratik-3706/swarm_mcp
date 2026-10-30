@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { SwarmStore, deliveryText, owedReplies, replyRequiredText, swarmHome, unreadMessages } from "./store.js";
+import { heartbeatDue, heartbeatText } from "./board.js";
 
 // The swarm counts as abandoned after this long without any activity; then nobody is held back.
 const QUIET_LIMIT_MS = 2 * 60 * 60_000;
@@ -80,12 +81,34 @@ async function takeUnread(session) {
   });
 }
 
-// After any tool the agent uses (an edit, a shell command...), hand it messages that arrived meanwhile,
-// so teammates reach it mid-task instead of when it next happens to check the swarm.
-async function deliverMessages(session, event) {
-  const messages = await takeUnread(session);
-  if (!messages.length) return;
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: deliveryText(messages) } }));
+// After any tool the agent uses (an edit, a shell command...): hand it messages that arrived meanwhile, so
+// teammates reach it mid-task; nudge it to post progress when its task has gone quiet; and, at most once a
+// minute, mark it as seen, so an agent busy editing never looks silent and loses its task.
+async function afterTool(session, event) {
+  const file = sessionFile(session);
+  if (!fs.existsSync(file)) return;
+  const link = JSON.parse(fs.readFileSync(file, "utf8"));
+  const store = new SwarmStore(link.swarm);
+  const stale = Date.now() - Date.parse(link.touchedAt || 0) > 60_000;
+  const pending = await store.view((state) => unreadMessages(state, link.name).length || heartbeatDue(state, link.name));
+  if (!pending && !stale) return;
+  const parts = await store.update((state) => {
+    const agent = state.agents[link.name];
+    if (!agent) return [];
+    agent.lastSeen = new Date().toISOString();
+    const out = [];
+    const messages = unreadMessages(state, link.name);
+    agent.msgCursor = state.seq.message;
+    if (messages.length) out.push(deliveryText(messages));
+    const due = heartbeatDue(state, link.name);
+    if (due) {
+      agent.heartbeatAskedAt = new Date().toISOString();
+      out.push(heartbeatText(due));
+    }
+    return out;
+  });
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), touchedAt: new Date().toISOString() }));
+  if (parts.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: parts.join("\n\n") } }));
 }
 
 // Before each tool: while the agent owes a reply, only swarm tools (MCP, or the shell fallback) may run.
@@ -158,7 +181,7 @@ export async function runHook(kind) {
     if (kind === "pre-tool") await gateTool(input, session);
     else if (kind === "post-tool") {
       recordJoin(input, session);
-      await deliverMessages(session, pick(input, "hook_event_name", "hookEventName") || "PostToolUse");
+      await afterTool(session, pick(input, "hook_event_name", "hookEventName") || "PostToolUse");
     }
     else if (kind === "stop") await decideStop(session);
   } catch {
