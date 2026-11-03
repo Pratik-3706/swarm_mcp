@@ -9,13 +9,16 @@
 //   swarm-mcp reset  [--swarm name]             wipe a swarm
 //   swarm-mcp call <tool> --as <name> [json]    run a swarm tool from a shell (no MCP needed)
 //   swarm-mcp hook pre-tool|post-tool|stop    hook helper for apps with Claude-style hooks
-//   swarm-mcp dashboard [--port n] [--swarm s] live board in the browser
+//   swarm-mcp dashboard [--swarm s] [--project p]   live board on http://127.0.0.1:56432
 //   swarm-mcp report [--swarm s]                plain-English status
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer, reportText, summarize } from "./server.js";
 import { startDashboard } from "./dashboard.js";
-import { SwarmStore, listSwarms } from "./store.js";
+import { SwarmStore, existingBoardRoot, listSwarms } from "./store.js";
+
+// Board commands default to the project board of the current folder, if it has one.
+const boardProject = () => option("project") || existingBoardRoot(process.cwd());
 import { installedAgents, runInstall } from "./install.js";
 import { runCall } from "./cli.js";
 import { runHook } from "./hook.js";
@@ -29,7 +32,7 @@ const option = (name) => {
 };
 
 async function printStatus(swarm) {
-  const store = new SwarmStore(swarm);
+  const store = new SwarmStore(swarm, { project: boardProject() });
   const state = await store.view();
   const recent = state.events.slice(-12).map((e) => `  ${e.at.slice(11, 19)} ${e.text}`);
   return `${summarize(state, null)}\n\nRecent activity:\n${recent.join("\n") || "  (none)"}`;
@@ -69,10 +72,10 @@ switch (cmd) {
     await runCall(rest);
     break;
   case "dashboard":
-    await startDashboard({ port: Number(option("port")) || 4777, swarm: option("swarm") || "default", open: !flag("no-open") });
+    await startDashboard({ swarm: option("swarm") || "default", project: boardProject(), open: !flag("no-open") });
     break;
   case "report":
-    console.log(reportText(await new SwarmStore(option("swarm") || "default").view()));
+    console.log(reportText(await new SwarmStore(option("swarm") || "default", { project: boardProject() }).view()));
     break;
   case "hook":
     await runHook(rest[0]);
@@ -92,12 +95,12 @@ switch (cmd) {
     }
   }
   case "reset":
-    await new SwarmStore(option("swarm") || "default").reset();
+    await new SwarmStore(option("swarm") || "default", { project: boardProject() }).reset();
     console.log(`Swarm "${option("swarm") || "default"}" reset.`);
     break;
   default:
     console.log(
-      "Usage: swarm-mcp [serve | update [--check] [--no-install] | install [--installed] [--dry-run] [--only claude,codex,antigravity-ide,...] [--no-hooks] [--no-instructions] | uninstall | status [--watch] [--swarm name] | reset [--swarm name] | call <tool> --as <name> [--role r] [--swarm s] [--arg value] | dashboard [--port n] [--swarm s] [--no-open] | report [--swarm s] | hook pre-tool|post-tool|stop]",
+      "Usage: swarm-mcp [serve | update [--check] [--no-install] | install [--installed] [--dry-run] [--only claude,codex,antigravity-ide,...] [--no-hooks] [--no-instructions] | uninstall | status [--watch] [--swarm name] | reset [--swarm name] | call <tool> --as <name> [--role r] [--swarm s] [--arg value] | dashboard [--swarm s] [--project p] [--no-open] | report [--swarm s] | hook pre-tool|post-tool|stop]",
     );
     process.exit(cmd === "help" || cmd === "--help" ? 0 : 1);
 }

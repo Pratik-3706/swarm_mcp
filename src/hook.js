@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { SwarmStore, deliveryText, owedReplies, replyRequiredText, swarmHome, unreadMessages } from "./store.js";
+import { BOARD_DIR, SwarmStore, deliveryText, detectProject, owedReplies, replyRequiredText, swarmHome, unreadMessages } from "./store.js";
 import { heartbeatDue, heartbeatText } from "./board.js";
 
 // The swarm counts as abandoned after this long without any activity; then nobody is held back.
@@ -41,7 +41,21 @@ function shellCall(command) {
   const flag = (f) => new RegExp(`--${f}[=\\s]+["']?([^\\s"']+)`).exec(m[3])?.[1];
   // Every shell call joins first, so any of them (except leaving) ties this conversation to the agent.
   const tool = /swarm_leave|swarm_reset/.test(m[2]) ? m[2] : "swarm_join";
-  return { tool, args: { name: flag("as"), role: flag("role") || "worker", swarm: flag("swarm") } };
+  return { tool, args: { name: flag("as"), role: flag("role") || "worker", swarm: flag("swarm"), project: flag("project") } };
+}
+
+/** The "Board: <file>" line of a join reply, as { swarm, project } (project null for the global board). */
+function boardFromReply(response) {
+  const m = /Board: (.+?\.json)/.exec(response);
+  if (!m) return null;
+  let file = m[1];
+  try {
+    file = JSON.parse(`"${file}"`); // the reply was JSON-encoded, so backslashes are escaped
+  } catch {
+    // already plain
+  }
+  const dir = path.dirname(file);
+  return { swarm: path.basename(file, ".json"), project: path.basename(dir) === BOARD_DIR ? path.dirname(dir) : null };
 }
 
 function recordJoin(input, session) {
@@ -55,11 +69,17 @@ function recordJoin(input, session) {
   if (!/swarm_join/.test(tool)) return;
   const response = JSON.stringify(pick(input, "tool_response", "toolResponse", "output", "result") ?? "");
   if (!args.name || !args.role || (response.includes("Error:") && !/Joined|Rejoined/.test(response))) return;
+  // Which board: the join reply says so; otherwise work it out the way the server and shell fallback do.
+  const board = boardFromReply(response) || {
+    swarm: args.swarm || process.env.SWARM_NAME || "default",
+    project: args.project || detectProject(pick(input, "cwd")),
+  };
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(
     file,
     JSON.stringify({
-      swarm: new SwarmStore(args.swarm || process.env.SWARM_NAME || "default").swarm,
+      swarm: board.swarm,
+      project: board.project,
       name: String(args.name).trim().toLowerCase().replace(/\s+/g, "-"),
       role: String(args.role).toLowerCase(),
       joinedAt: new Date().toISOString(),
@@ -72,7 +92,7 @@ async function takeUnread(session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return [];
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const store = new SwarmStore(link.swarm);
+  const store = new SwarmStore(link.swarm, { project: link.project });
   if (!(await store.view((state) => unreadMessages(state, link.name).length))) return [];
   return store.update((state) => {
     const messages = unreadMessages(state, link.name);
@@ -88,7 +108,7 @@ async function afterTool(session, event) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return;
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const store = new SwarmStore(link.swarm);
+  const store = new SwarmStore(link.swarm, { project: link.project });
   const stale = Date.now() - Date.parse(link.touchedAt || 0) > 60_000;
   const pending = await store.view((state) => unreadMessages(state, link.name).length || heartbeatDue(state, link.name));
   if (!pending && !stale) return;
@@ -116,7 +136,7 @@ async function gateTool(input, session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return;
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const owed = await new SwarmStore(link.swarm).view((state) => owedReplies(state, link.name));
+  const owed = await new SwarmStore(link.swarm, { project: link.project }).view((state) => owedReplies(state, link.name));
   if (!owed.length) return;
   const tool = String(pick(input, "tool_name", "toolName", "name") || "");
   let args = pick(input, "tool_input", "toolInput", "arguments", "input") || {};
@@ -136,7 +156,7 @@ async function decideStop(session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return; // this conversation never joined a swarm
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const state = await new SwarmStore(link.swarm).view();
+  const state = await new SwarmStore(link.swarm, { project: link.project }).view();
   const agent = state.agents[link.name];
   const lastActivity = Date.parse(state.events.at(-1)?.at || state.createdAt);
   const owed = agent ? owedReplies(state, link.name) : [];

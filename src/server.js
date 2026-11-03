@@ -1,6 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { SwarmStore, TASK_STATUSES, deliveryText, owedReplies, pushEvent, replyRequiredText, unreadMessages } from "./store.js";
+import { fileURLToPath } from "node:url";
+import {
+  SwarmStore,
+  TASK_STATUSES,
+  deliveryText,
+  existingBoardRoot,
+  listProjects,
+  owedReplies,
+  pushEvent,
+  replyRequiredText,
+  unreadMessages,
+} from "./store.js";
 import { PLAYBOOKS, SERVER_INSTRUCTIONS, managerPrompt, workerPrompt, reviewerPrompt } from "./prompts.js";
 import { recordWait, waitPolicy } from "./waits.js";
 import { execFile } from "node:child_process";
@@ -214,23 +225,36 @@ export function snapshot(state) {
     finished: !!state.finishedAt,
     updatedAt: state.events.at(-1)?.at || state.createdAt,
     totals: { tasks: live.length, done: count("done"), review: count("review"), inProgress: count("in_progress"), todo: count("todo"), blocked: count("blocked"), percent },
+    createdAt: state.createdAt,
+    finishedAt: state.finishedAt || null,
+    rev: state.rev,
+    seq: state.seq,
+    archivedRounds: Object.keys(state.archivedNotes || {}).length,
     agents: Object.values(state.agents).map((a) => {
       const t = state.tasks.find((x) => x.assignee === a.name && x.status === "in_progress");
       return {
         name: a.name,
         role: a.role,
         client: a.client,
+        about: a.about,
+        presence: presence(state, a),
         state: agentState(state, a),
+        joinedAt: a.joinedAt,
         lastSeen: a.lastSeen,
+        waitingUntil: isWaiting(a) ? a.waitingUntil : null,
+        unread: unreadMessages(state, a.name).length,
         owes: owedReplies(state, a.name).map((m) => m.id),
-        task: t && { id: t.id, title: t.title, progress: t.progress ?? 0, eta: t.eta, progressAt: t.progressAt },
+        heartbeatAskedAt: a.heartbeatAskedAt || null,
+        task: t && { id: t.id, title: t.title, progress: t.progress ?? 0, eta: t.eta, progressAt: t.progressAt, claimedAt: t.claimedAt },
       };
     }),
     tasks: state.tasks.map((t) => ({
       id: t.id,
       title: t.title,
+      description: t.description,
       status: t.status,
       assignee: t.assignee,
+      createdBy: t.createdBy,
       priority: t.priority,
       progress: t.status === "done" ? 100 : t.progress ?? 0,
       eta: t.status === "in_progress" ? t.eta : null,
@@ -238,12 +262,26 @@ export function snapshot(state) {
       waitingOnDeps: t.status === "todo" && !depsDone(state, t),
       result: t.result,
       files: t.files || [],
-      lastNote: t.notes.at(-1)?.text || null,
+      notes: t.notes,
+      createdAt: t.createdAt,
+      claimedAt: t.claimedAt || null,
+      progressAt: t.progressAt || null,
       updatedAt: t.updatedAt,
     })),
-    locks: Object.entries(state.locks).map(([p, l]) => ({ path: p, by: l.by, taskId: l.taskId })),
-    alerts: stallAlerts(state, null).map((x) => x.text),
-    activity: state.events.slice(-40).reverse().map((e) => ({ at: e.at, text: e.text })),
+    locks: Object.entries(state.locks).map(([p, l]) => ({ path: p, by: l.by, taskId: l.taskId, at: l.at })),
+    notes: Object.entries(state.notes).map(([key, n]) => ({ key, by: n.by, at: n.at, value: n.value })),
+    alerts: [...presenceAlerts(state, null), ...stallAlerts(state, null)].map((x) => x.text),
+    activity: state.events.slice(-250).reverse().map((e) => ({ id: e.id, at: e.at, by: e.by, type: e.type, text: e.text })),
+    messages: state.messages.slice(-300).reverse().map((m) => ({
+      id: m.id,
+      at: m.at,
+      from: m.from,
+      to: m.to === "*" ? ["all"] : m.to,
+      content: m.content,
+      replyTo: m.replyTo ?? null,
+      needsReply: !!m.needsReply,
+      repliedBy: state.messages.filter((r) => r.replyTo === m.id).map((r) => r.from),
+    })),
   };
 }
 
@@ -266,7 +304,7 @@ export function reportText(state) {
       out.push(`- ${a.name} (${a.role}${a.client ? `, ${a.client}` : ""}): ${doing}${a.owes.length ? `; owes a reply to message ${a.owes.map((i) => `#${i}`).join(", ")}` : ""}`);
     }
   }
-  const attention = [...s.alerts, ...s.tasks.filter((t) => t.status === "blocked").map((t) => `#${t.id} "${t.title}" is blocked${t.lastNote ? `: ${t.lastNote}` : ""}`)];
+  const attention = [...s.alerts, ...s.tasks.filter((t) => t.status === "blocked").map((t) => `#${t.id} "${t.title}" is blocked${t.notes.length ? `: ${t.notes.at(-1).text}` : ""}`)];
   if (attention.length) out.push("", "Needs attention:", ...attention.map((x) => `- ${x}`));
   const finished = s.tasks
     .filter((t) => t.status === "done" || t.status === "review")
@@ -335,10 +373,25 @@ export function createServer() {
   // Identity of the agent behind this stdio connection.
   const session = { store: null, name: null };
 
+  // The workspace folder the client says it has open (MCP roots), if it supports that.
+  async function clientRoot() {
+    try {
+      if (!server.server.getClientCapabilities()?.roots) return null;
+      const { roots } = await server.server.listRoots(undefined, { timeout: 3000 });
+      const uri = roots?.find((r) => r.uri.startsWith("file:"))?.uri;
+      return uri ? fileURLToPath(uri) : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function join({ name, role, swarm, client, about, goal, project, new_round, force }) {
-    const store = new SwarmStore(swarm || process.env.SWARM_NAME || "default");
+    // Which project's board: the folder the agent names, else its app's workspace, else a board already
+    // set up above the folder this server runs in. With none of those it's the global board.
+    const wanted = project || process.env.SWARM_PROJECT || (await clientRoot()) || existingBoardRoot(process.cwd());
+    const store = new SwarmStore(swarm || process.env.SWARM_NAME || "default", { project: wanted });
     name = name.trim().toLowerCase().replace(/\s+/g, "-");
-    project = projectPath(project);
+    project = store.project || projectPath(wanted);
     const isManager = role.toLowerCase() === "manager";
     const result = await store.update((state) => {
       const existing = state.agents[name];
@@ -392,11 +445,21 @@ export function createServer() {
           );
         else notices.push(`Project folder: ${state.project}. Do all your work inside it.`);
       }
+      // An agent alone on a fresh project board may simply be in the wrong folder: point at live swarms.
+      const others = Object.values(state.agents).filter((a) => a.name !== name);
+      if (store.root && !others.length && !isManager) {
+        const live = listProjects().filter((p) => p.root !== store.project && Date.now() - Date.parse(p.usedAt) < 2 * 3600_000);
+        if (live.length)
+          notices.push(
+            `Nobody else is on this project's board yet. If the manager is working in a different folder, rejoin with that project, e.g. swarm_join(name="${name}", role="${role}", project="${live[0].root}"). Recently active swarm boards: ${live.slice(0, 3).map((p) => p.root).join(", ")}.`,
+          );
+      }
       // Rejoining under the same role (a restarted app, or each call of the shell fallback) is not news.
       if (!existing || existing.role !== role || existing.status === "offline")
         pushEvent(state, name, "join", `${name} ${existing ? "rejoined" : "joined"} as ${role}`);
       return {
         rejoined: !!existing,
+        board: store.file,
         notices,
         summary: summarize(state, name),
         unread: inboxFor(state, name).messages.length,
@@ -599,10 +662,21 @@ export function createServer() {
       try {
         const r = await join(args);
         const role = PLAYBOOKS[args.role.toLowerCase()] ? args.role.toLowerCase() : "worker";
-        const parts = [`${r.rejoined ? "Rejoined" : "Joined"} as "${session.name}" (${args.role}).`, ...r.notices];
+        // The board line also tells the hooks (hook.js) which board this conversation is on.
+        const parts = [`${r.rejoined ? "Rejoined" : "Joined"} as "${session.name}" (${args.role}).\nBoard: ${r.board}`, ...r.notices];
         parts.push(r.summary, `Unread messages: ${r.unread}`, PLAYBOOKS[role]);
         const notice = updateNotice();
         if (notice && role === "manager") parts.splice(1, 0, notice); // workers shouldn't wander off to update mid-swarm
+        if (role === "manager") {
+          // The dashboard starts with the manager, and the user gets its link in the manager's first reply.
+          const url = await ensureDashboard({ swarm: session.store.swarm, project: session.store.project });
+          if (url)
+            parts.splice(
+              1,
+              0,
+              `LIVE DASHBOARD: ${url}\nGive the user this link in your first reply to them (e.g. "Live dashboard: ${url}"), and again whenever they ask for it. It shows the crew, every task, messages, locks and all board activity as it happens.`,
+            );
+        }
         if (role === "worker")
           parts.push(
             r.mine.length
@@ -1142,6 +1216,22 @@ export function createServer() {
   );
 
   server.registerTool(
+    "swarm_dashboard",
+    {
+      title: "Dashboard link",
+      description:
+        "The link to the live swarm dashboard (http://127.0.0.1:56432), which shows the crew, every task with progress, messages and replies, locks, notes and all board activity as it happens. Starts it if it isn't running. Use it whenever the user asks for the dashboard or its URL; open=true also opens it in their browser.",
+      inputSchema: { open: z.boolean().optional().describe("Also open it in the user's browser") },
+    },
+    tool(async ({ open }, s) => {
+      const url = await ensureDashboard({ swarm: s.store.swarm, project: s.store.project, open: !!open });
+      return url
+        ? text(`Live dashboard: ${url}${open ? " (opened in the user's browser)" : ""}`)
+        : fail(`The dashboard didn't start (is port 56432 taken?). The user can run it with: node "${UPDATE_ENTRY}" dashboard`);
+    }),
+  );
+
+  server.registerTool(
     "swarm_report",
     {
       title: "Status report for the user",
@@ -1156,7 +1246,7 @@ export function createServer() {
         return reportText(state);
       });
       if (!dashboard) return text(`${report}\n\n(For a live view, call swarm_report(dashboard=true) or run: npm run dashboard)`);
-      const url = await ensureDashboard(s.store.swarm);
+      const url = await ensureDashboard({ swarm: s.store.swarm, project: s.store.project, open: true });
       return text(`${report}\n\n${url ? `Live dashboard: ${url} (opened in the user's browser; it refreshes every 2 seconds).` : "Couldn't start the dashboard; the user can run: npm run dashboard"}`);
     }),
   );

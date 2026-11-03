@@ -1,5 +1,6 @@
-// Checks the board features: project binding and new rounds, progress heartbeats, auto-return of
-// stalled tasks, changed-file tracking, swarm_report and the dashboard. Timers are shortened to seconds.
+// Checks the board features: per-project boards and new rounds, progress heartbeats, auto-return of
+// stalled tasks, changed-file tracking, swarm_report, the dashboard link and the dashboard itself.
+// Timers are shortened to seconds; the dashboard runs on a test port.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -14,12 +15,21 @@ const entry = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "swarm-board-"));
 const project = path.join(home, "project");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const PORT = 56499;
 // 0.05 min = 3 s: a task holder silent that long loses its task, and progress is due that often.
-const env = { ...process.env, SWARM_MCP_HOME: path.join(home, ".swarm"), SWARM_REASSIGN_MINUTES: "0.05", SWARM_HEARTBEAT_MINUTES: "0.05", SWARM_NO_UPDATE_CHECK: "1" };
+const env = {
+  ...process.env,
+  SWARM_MCP_HOME: path.join(home, ".swarm-home"),
+  SWARM_REASSIGN_MINUTES: "0.05",
+  SWARM_HEARTBEAT_MINUTES: "0.05",
+  SWARM_NO_UPDATE_CHECK: "1",
+  SWARM_NO_DASHBOARD: "1",
+  SWARM_DASHBOARD_PORT: String(PORT),
+};
 
 async function agent(name) {
   const client = new Client({ name, version: "1.0.0" });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry], env }));
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry], env, cwd: home }));
   const call = async (tool, args = {}) => {
     const r = await client.callTool({ name: tool, arguments: args });
     const out = r.content.map((c) => c.text).join("\n");
@@ -42,10 +52,24 @@ await sleep(1200);
 
 const [mgr, w1, w2] = await Promise.all([agent("manager"), agent("w1"), agent("w2")]);
 try {
-  // --- project binding ---
-  await mgr.call("swarm_join", { name: "boss", role: "manager", goal: "Build v1", project });
+  // --- per-project boards ---
+  const joined = await mgr.call("swarm_join", { name: "boss", role: "manager", goal: "Build v1", project });
+  assert.match(joined, /Board: .*project[\\/]\.swarm[\\/]default\.json/);
+  assert.match(joined, new RegExp(`LIVE DASHBOARD: http://127\\.0\\.0\\.1:${PORT}/\\?project=[\\s\\S]*Give the user this link in your first reply`));
+  assert.match(await mgr.call("swarm_dashboard"), new RegExp(`^Live dashboard: http://127\\.0\\.0\\.1:${PORT}/\\?project=`));
+  // The board lives in <project>/.swarm, created on first use and ignored by git.
+  const boardFile = path.join(project, ".swarm", "default.json");
+  assert.ok(fs.existsSync(boardFile));
+  assert.equal(fs.readFileSync(path.join(project, ".swarm", ".gitignore"), "utf8").trim(), "*");
+  assert.equal(git("status", "--porcelain", "--", ".swarm").trim(), "", "the board shows up in git");
+
   assert.match(await w1.call("swarm_join", { name: "w1", role: "worker", project }), /Project folder: .*project\. Do all your work inside it/);
-  assert.match(await w2.call("swarm_join", { name: "w2", role: "worker", project: path.join(home, "elsewhere") }), /WARNING: this swarm's project folder is .*project, but you are in .*elsewhere/);
+  // A worker in another folder lands on that folder's empty board and is pointed at the live one...
+  fs.mkdirSync(path.join(home, "elsewhere"));
+  assert.match(await w2.call("swarm_join", { name: "w2", role: "worker", project: path.join(home, "elsewhere") }), /Nobody else is on this project's board yet[\s\S]*Recently active swarm boards: .*project/);
+  // ...and a subfolder of the project finds the project's board.
+  fs.mkdirSync(path.join(project, "src"));
+  assert.match(await w2.call("swarm_join", { name: "w2", role: "worker", project: path.join(project, "src") }), /Board: .*project[\\/]\.swarm[\\/]default\.json/);
 
   // --- changed files and progress ---
   await mgr.call("task_create", { tasks: [{ title: "Edit app", assignee: "w1" }, { title: "Docs", assignee: "w2" }, { title: "Later" }] });
@@ -68,8 +92,7 @@ try {
 
   // --- auto-return: w2 goes silent while holding #2 ---
   await sleep(3500);
-  const status = await mgr.call("swarm_status");
-  assert.match(status, /#2 \[todo\] Docs \(unassigned\)/, "silent agent's task was not returned");
+  assert.match(await mgr.call("swarm_status"), /#2 \[todo\] Docs \(unassigned\)/, "silent agent's task was not returned");
   assert.match(await mgr.call("task_list", { task_id: 2 }), /Returned to the board: w2 was silent/);
   assert.match(await w2.call("swarm_inbox", { wait_seconds: 0 }), /#2 "Docs" went back on the board because you were silent/);
 
@@ -80,31 +103,44 @@ try {
   assert.match(report, /Recently finished:\n- #1 "Edit app" by w1: Edited app \[2 files\]/);
   assert.match(report, /Up next:\n- #2 "Docs" \(open to any worker\)/);
 
-  // --- new rounds ---
-  // Different wording, same project: only a warning, nothing closed.
+  // --- new rounds on the same board ---
   assert.match(await mgr.call("swarm_join", { name: "boss", role: "manager", goal: "Build v2", project }), /WARNING: the board still has 2 open task\(s\) from the previous goal "Build v1"[\s\S]*new_round=true/);
   assert.match(await mgr.call("swarm_status"), /#3 \[todo\] Later/);
-  // new_round closes the old tasks and archives the old notes, so workers don't pick them up.
   assert.match(await mgr.call("swarm_join", { name: "boss", role: "manager", goal: "Build v2", project, new_round: true }), /Started a fresh round[\s\S]*Closed 2 open task\(s\) and archived 1 note/);
   assert.match(await w1.call("task_claim", { wait_seconds: 0 }), /No task for you yet/);
   assert.match(await w1.call("note_get"), /No shared notes yet/);
-  // Another project folder starts a fresh round by itself.
-  await mgr.call("task_create", { tasks: [{ title: "v2 work" }] });
-  assert.match(await mgr.call("swarm_join", { name: "boss", role: "manager", goal: "Other app", project: path.join(home, "other") }), /Started a fresh round for this goal \(different project folder\)/);
+
+  // --- another project has its own board; the first is left as it was ---
+  const other = path.join(home, "other");
+  fs.mkdirSync(other);
+  assert.match(await mgr.call("swarm_join", { name: "boss", role: "manager", goal: "Other app", project: other }), /Board: .*other[\\/]\.swarm[\\/]default\.json/);
+  assert.match(fs.readFileSync(boardFile, "utf8"), /"goal": "Build v2"/);
+  await mgr.call("message_send", { to: "nobody-yet", content: "hello" });
 
   // --- dashboard ---
-  const dash = spawn(process.execPath, [entry, "dashboard", "--no-open", "--port", "4890"], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const dash = spawn(process.execPath, [entry, "dashboard", "--no-open"], { env, cwd: home, stdio: ["ignore", "pipe", "pipe"] });
   try {
     await new Promise((resolve, reject) => {
       dash.stdout.on("data", (d) => /Swarm dashboard: /.test(d) && resolve());
       dash.on("exit", () => reject(new Error("dashboard exited")));
       setTimeout(() => reject(new Error("dashboard did not start")), 8000);
     });
-    const port = JSON.parse(fs.readFileSync(path.join(env.SWARM_MCP_HOME, "dashboard.json"), "utf8")).port;
-    const api = await (await fetch(`http://127.0.0.1:${port}/api`)).json();
+    const base = `http://127.0.0.1:${PORT}`;
+    const api = await (await fetch(`${base}/api?project=${encodeURIComponent(other)}`)).json();
     assert.equal(api.goal, "Other app");
-    assert.ok(api.agents.some((a) => a.name === "w1") && typeof api.totals.percent === "number" && Array.isArray(api.activity));
-    assert.match(await (await fetch(`http://127.0.0.1:${port}/`)).text(), /<title>Swarm dashboard<\/title>/);
+    assert.match(api.system.board, /other[\\/]\.swarm[\\/]default\.json$/);
+    assert.ok(api.agents.some((a) => a.name === "boss" && a.presence));
+    assert.ok(api.messages.some((m) => m.content === "hello" && m.needsReply && m.to[0] === "nobody-yet"));
+    assert.ok(api.activity.some((e) => e.type === "join" && e.by === "boss"));
+    const first = await (await fetch(`${base}/api?project=${encodeURIComponent(project)}`)).json();
+    assert.ok(first.tasks.some((t) => t.title === "Edit app" && t.files.includes("app.js") && t.notes.length));
+    const boards = await (await fetch(`${base}/api/boards`)).json();
+    assert.ok(boards.some((b) => b.project?.endsWith("/other")) && boards.some((b) => b.project?.endsWith("/project")));
+    const page = await (await fetch(`${base}/`)).text();
+    assert.match(page, /<title>Swarm · dispatch<\/title>/);
+    // A second start finds the running one instead of failing on the port.
+    const again = execFileSync(process.execPath, [entry, "dashboard", "--no-open"], { env, cwd: home, encoding: "utf8" });
+    assert.match(again, /already running: http:\/\/127\.0\.0\.1:56499\//);
   } finally {
     dash.kill();
   }

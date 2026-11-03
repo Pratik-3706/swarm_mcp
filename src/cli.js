@@ -13,12 +13,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "./server.js";
-import { SwarmStore } from "./store.js";
+import { SwarmStore, detectProject } from "./store.js";
 
 // Agents' shell tools usually kill commands after about two minutes, so waits stay under that.
 const SHELL_WAIT = Number(process.env.SWARM_WAIT_SECONDS) || 90;
 const WAITING_TOOLS = ["task_claim", "swarm_inbox", "file_lock"];
-const IDENTITY = ["as", "role", "swarm"];
+const IDENTITY = ["as", "role", "swarm", "project"];
 
 const USAGE = `Usage: swarm-mcp call <tool> --as <your-name> [--role worker|manager|reviewer] [--swarm name] [--arg value ...] ['{"arg":"value"}']
 Examples:
@@ -58,7 +58,9 @@ export async function runCall(argv) {
     return;
   }
   const name = identity.as.trim().toLowerCase().replace(/\s+/g, "-");
-  const store = new SwarmStore(identity.swarm || process.env.SWARM_NAME || "default");
+  // The shell's folder picks the project board, as an agent's working folder would.
+  const project = identity.project || process.env.SWARM_PROJECT || detectProject(process.cwd()) || undefined;
+  const store = new SwarmStore(identity.swarm || process.env.SWARM_NAME || "default", { project });
   const existing = await store.view((state) => state.agents[name]);
 
   const server = createServer();
@@ -74,7 +76,7 @@ export async function runCall(argv) {
   try {
     // Every call is a fresh process, so it joins first; rejoining under the same role is silent.
     const role = identity.role || args.role || existing?.role || "worker";
-    const joined = await call("swarm_join", { ...(tool === "swarm_join" ? args : {}), name, role, swarm: store.swarm });
+    const joined = await call("swarm_join", { ...(tool === "swarm_join" ? args : {}), name, role, swarm: store.swarm, ...(store.project ? { project: store.project } : {}) });
     if (tool === "swarm_join" || joined.isError) {
       console.log(joined.text);
       if (joined.isError) process.exitCode = 1;

@@ -13,7 +13,7 @@ const entry = path.join(root, "src", "index.js");
 
 if (!process.env.SWARM_TEST_HOME) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "swarm-hooks-"));
-  const env = { ...process.env, SWARM_TEST_HOME: home, HOME: home, USERPROFILE: home, SWARM_MCP_HOME: path.join(home, ".swarm-mcp") };
+  const env = { ...process.env, SWARM_TEST_HOME: home, HOME: home, USERPROFILE: home, SWARM_MCP_HOME: path.join(home, ".swarm-mcp"), SWARM_NO_DASHBOARD: "1", SWARM_NO_UPDATE_CHECK: "1" };
   delete env.CODEX_HOME;
   const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], { env, stdio: "inherit" });
   fs.rmSync(home, { recursive: true, force: true });
@@ -22,7 +22,7 @@ if (!process.env.SWARM_TEST_HOME) {
 
 const home = process.env.SWARM_TEST_HOME;
 const cli = (...args) => {
-  const r = spawnSync(process.execPath, [entry, ...args], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, [entry, ...args], { encoding: "utf8", cwd: home }); // no git here: global board
   return { out: r.stdout.trim(), code: r.status };
 };
 const hook = (kind, input) => execFileSync(process.execPath, [entry, "hook", kind], { input: JSON.stringify(input), encoding: "utf8" }).trim();

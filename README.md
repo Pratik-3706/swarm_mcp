@@ -110,18 +110,51 @@ Ask the manager *"how's it going?"*. It calls `swarm_report`, which gives a plai
 - what needs attention
 - what finished recently, and what's next
 
-For a live view, open the dashboard:
+`npm run report` prints the same status in a terminal.
+
+### Live dashboard: http://127.0.0.1:56432
+
+A page on your own computer that shows everything the swarm is doing, refreshed every 2 seconds:
+
+- **Masthead:** the goal, overall %, and a strip with one cell per task: done, in review, in progress (filled to its %), blocked, queued.
+- **Crew:** a lane per agent showing:
+  - its state: working, waiting, silent or left
+  - its current task, with % done and ETA
+  - when it claimed the task and last reported
+  - whether it's waiting inside a call, owes replies, or has unread messages
+  - a one-hour activity strip
+- **Ledger:** every task. Click one for its brief, dependencies, notes, result and the files it changed.
+- **Conversations:** every message the agents sent each other, with replies nested under the message they answer, marked as answered, awaiting a reply (and from whom), or a notice. You can filter by agent.
+- **Wire:** the live feed of every board event, such as joins, claims, updates, locks, messages, rounds and auto-returned tasks. You can filter by kind and by agent.
+- **Locks, shared notes, and "under the hood":**
+  - board revision and event/message/task counters
+  - agents waiting in a call
+  - replies owed and unread messages
+  - the wait length learned for each app
+  - update status and the board file's path
+
+**You don't have to start it.** It starts with the manager, and the manager's first reply gives you the link. Any agent gives you the link when you ask *"what's the dashboard URL?"*, using the `swarm_dashboard` tool. To run it yourself:
 
 ```bash
 npm run dashboard
 ```
 
-You can also ask the manager to *"open the dashboard"*. It's a page on your own computer (127.0.0.1) that refreshes every 2 seconds. It shows overall progress, every task with its status, progress bar and ETA, each agent's state and current task, who owes a reply, file locks, alerts, and recent activity. `npm run report` prints the same status as `swarm_report` in a terminal.
+One dashboard serves every board. Switch boards with the selector at the top. It follows your light or dark setting, and there's a toggle.
 
-### Projects, rounds and stalled work
+### Project boards
 
-- **One project per board.** Agents pass `project` (the folder they work in) when they join. The manager's folder becomes the swarm's project. A worker in a different folder is warned to work in the right one.
-- **Fresh rounds.** When the manager starts a goal in a different project folder, or a new goal after the swarm finished, the old round closes on its own: open tasks are cancelled, notes are archived, and locks and pending replies are cleared. So nobody picks up the previous project's work. A different goal in the same folder only gets a warning. The manager confirms with `new_round=true`, so a restarted manager can't wipe a live board by accident.
+**Each project has its own board, inside the project.** The first time swarm is used in a project, it creates `<project root>/.swarm/`, which holds that project's tasks, notes and messages. The folder has its own `.gitignore`, so git ignores it and your project's `.gitignore` isn't touched. A new project starts with a clean board, so an older project's work never leaks into it.
+
+How the project is found:
+1. the `project` folder an agent passes when it joins
+2. otherwise, the workspace folder the agent's app reports to the server
+3. otherwise, an existing `.swarm` folder above the folder the server runs in
+
+The shell fallback uses the folder it runs in. A subfolder finds its project's board, because it walks up to the folder that has `.swarm`, or the git root. With no project at all, the global board in `~/.swarm-mcp` is used. If an agent ends up alone on a fresh board while another swarm is active, it's told where that swarm is.
+
+### Rounds and stalled work
+
+- **Fresh rounds.** On the same board, a manager with a new goal after the swarm finished closes the old round on its own: open tasks are cancelled, notes archived, and locks and pending replies cleared. A different goal while work is still open only gets a warning, and the manager confirms with `new_round=true`, so a restarted manager can't wipe a live board by accident.
 - **One manager.** A second agent joining as manager is refused unless it passes `force=true`, which it should only do if you asked for two managers.
 - **Progress heartbeat.** Workers post `task_update(progress=…, eta=…)` about every 10 minutes and get a reminder if they forget.
 - **Auto-return.** A task whose holder has been silent for 20 minutes goes back on the board for anyone to claim, and the holder is told. With the hooks, any tool use counts as activity, so an agent busy editing never loses its task.
@@ -168,6 +201,7 @@ Each swarm has a name (default `default`). Use a different one per project, for 
 | `swarm_join` | Join with a name, role and `project` folder; returns the team, the board and your playbook. Managers pass `goal`, and `new_round` to close a previous goal's leftovers |
 | `swarm_team` | The roster: who joined, who's working on what (with % and ETA), who's waiting, who stopped responding, who left, plus recent joins and leaves. The manager is also alerted in `swarm_inbox` when an agent stops responding |
 | `swarm_report` | Plain-English status for the user. `dashboard=true` also opens the live dashboard |
+| `swarm_dashboard` | The live dashboard's link (http://127.0.0.1:56432), starting it if needed. `open=true` opens it in the browser |
 | `swarm_status` | Overview of agents, tasks, locks, notes |
 | `task_create` | Add tasks (batch), with `assignee`, `priority`, `depends_on` (`"$1"` = first task in the batch) |
 | `task_list` | Task details, filtered by status, assignee or id |
@@ -237,11 +271,13 @@ Optional env vars:
 
 - `SWARM_AGENT` + `SWARM_ROLE`: join automatically under a fixed name.
 - `SWARM_NAME`: the default swarm.
-- `SWARM_MCP_HOME`: where state is stored (default `~/.swarm-mcp`).
 - `SWARM_WAIT_SECONDS`: a fixed wait for `task_claim`, `swarm_inbox` and `file_lock`, which turns off the learning. The shell fallback uses 90s by default. `SWARM_MAX_WAIT_SECONDS`: the most it will ever learn (1800).
 - `SWARM_IDLE_SECONDS`: how long an agent with no task and no wait counts as active before it's shown as stopped (90).
 - `SWARM_REASSIGN_MINUTES`: how long a task holder can be silent before its task goes back on the board (20).
 - `SWARM_HEARTBEAT_MINUTES`: how often workers are reminded to post progress (10).
+- `SWARM_PROJECT`: the project folder to use when an agent doesn't pass one.
+- `SWARM_DASHBOARD_PORT`: the dashboard's port (56432).
+- `SWARM_MCP_HOME`: where the global board, learned waits and the list of project boards live (`~/.swarm-mcp`).
 - `SWARM_NO_UPDATE_CHECK=1`: turn off the daily update check.
 - `SWARM_CLIENT`: the client's display name. By default it's the name the client sends when it connects.
 

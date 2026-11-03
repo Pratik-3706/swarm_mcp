@@ -27,11 +27,12 @@ export function sanitizeSwarmName(name) {
   return clean || "default";
 }
 
-function emptyState(swarm) {
+function emptyState(swarm, project = null) {
   return {
     swarm,
     createdAt: new Date().toISOString(),
     goal: null,
+    project, // set for boards that live in a project folder
     rev: 0,
     seq: { task: 0, message: 0, event: 0 },
     agents: {},
@@ -43,13 +44,98 @@ function emptyState(swarm) {
   };
 }
 
+// ------------------------------------------------------------------ project boards
+//
+// A project's board lives in the project itself: <project root>/.swarm/<swarm>.json, created the first time
+// swarm is used there. So each project has its own tasks and notes, and an older project's work can't leak
+// into a new one. Agents with no project fall back to the global board in ~/.swarm-mcp.
+
+export const BOARD_DIR = ".swarm";
+
+/**
+ * The root a path belongs to: the nearest folder above it (or itself) that already has a board, else the
+ * nearest git root, else the path itself. So an agent opened in a subfolder still finds the project's board.
+ */
+export function projectRoot(p) {
+  if (!p) return null;
+  const start = path.resolve(String(p));
+  let gitRoot = null;
+  for (let dir = start; ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, BOARD_DIR))) return dir;
+    if (!gitRoot && fs.existsSync(path.join(dir, ".git"))) gitRoot = dir;
+    if (path.dirname(dir) === dir) break;
+  }
+  return gitRoot || start;
+}
+
+/** The nearest folder at or above p that already has a board, or null. */
+export function existingBoardRoot(p) {
+  if (!p) return null;
+  for (let dir = path.resolve(String(p)); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, BOARD_DIR))) return dir;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+/** For a shell's current folder: the board root above it, else its git root, else null (use the global board). */
+export function detectProject(p) {
+  if (!p) return null;
+  const board = existingBoardRoot(p);
+  if (board) return board;
+  for (let dir = path.resolve(String(p)); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+const registryFile = () => path.join(swarmHome(), "projects.json");
+
+/** Project boards seen on this machine, newest first: [{ root, swarm, usedAt }]. */
+export function listProjects() {
+  try {
+    return Object.entries(JSON.parse(fs.readFileSync(registryFile(), "utf8")))
+      .map(([key, v]) => ({ ...v, key }))
+      .filter((v) => fs.existsSync(path.join(v.root, BOARD_DIR)))
+      .sort((a, b) => Date.parse(b.usedAt) - Date.parse(a.usedAt));
+  } catch {
+    return [];
+  }
+}
+
+function registerProject(root, swarm) {
+  try {
+    let all = {};
+    try {
+      all = JSON.parse(fs.readFileSync(registryFile(), "utf8"));
+    } catch {
+      // first one
+    }
+    const key = `${root}|${swarm}`;
+    if (all[key] && Date.now() - Date.parse(all[key].usedAt) < 5 * 60_000) return; // hooks run per tool call; don't rewrite each time
+    all[key] = { root, swarm, usedAt: new Date().toISOString() };
+    fs.mkdirSync(swarmHome(), { recursive: true });
+    fs.writeFileSync(registryFile(), JSON.stringify(all, null, 2));
+  } catch {
+    // the registry only feeds the dashboard and hints
+  }
+}
+
 export class SwarmStore {
-  constructor(swarm) {
+  /** project: a folder in the project (its root is found), or null for the global board. */
+  constructor(swarm, { project = null } = {}) {
     this.swarm = sanitizeSwarmName(swarm);
-    this.dir = swarmHome();
+    this.root = projectRoot(project);
+    this.project = this.root ? this.root.split(path.sep).join("/") : null; // as stored and shown
+    this.dir = this.root ? path.join(this.root, BOARD_DIR) : swarmHome();
     this.file = path.join(this.dir, `${this.swarm}.json`);
     this.lockDir = `${this.file}.lock`;
+    const fresh = !fs.existsSync(this.dir);
     fs.mkdirSync(this.dir, { recursive: true });
+    if (this.root) {
+      // Keep the board out of the project's git history without touching its own .gitignore.
+      if (fresh || !fs.existsSync(path.join(this.dir, ".gitignore"))) fs.writeFileSync(path.join(this.dir, ".gitignore"), "*\n");
+      registerProject(this.project, this.swarm);
+    }
   }
 
   async #acquire() {
@@ -83,11 +169,11 @@ export class SwarmStore {
     try {
       raw = fs.readFileSync(this.file, "utf8");
     } catch (err) {
-      if (err.code === "ENOENT") return emptyState(this.swarm);
+      if (err.code === "ENOENT") return emptyState(this.swarm, this.project);
       throw err;
     }
-    if (!raw.trim()) return emptyState(this.swarm);
-    return { ...emptyState(this.swarm), ...JSON.parse(raw) };
+    if (!raw.trim()) return emptyState(this.swarm, this.project);
+    return { ...emptyState(this.swarm, this.project), ...JSON.parse(raw) };
   }
 
   async #write(state) {
@@ -134,7 +220,7 @@ export class SwarmStore {
   async reset() {
     await this.#acquire();
     try {
-      await this.#write(emptyState(this.swarm));
+      await this.#write(emptyState(this.swarm, this.project));
     } finally {
       this.#release();
     }

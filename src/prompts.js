@@ -7,6 +7,8 @@ If the user says you are the manager / a worker / a reviewer of the swarm (or as
 
 Once you have joined, work on your own. Don't stop to ask the user for confirmation, permission or a plan review: the manager coordinates the work, so send questions to the manager with message_send and keep going.
 
+Dashboard: a live dashboard runs on the user's computer at http://127.0.0.1:56432. Whenever the user asks for the dashboard, its link or URL, or how to watch the swarm, call swarm_dashboard and give them the link it returns.
+
 Stay in the swarm until it is finished. Don't end your turn just because you have nothing to do right now: waiting is part of the job, and the swarm tools do the waiting for you (task_claim for workers, swarm_inbox for the manager), each for as long as your app allows. When a swarm call returns, times out or errors, call it again. End your turn only when the swarm is finished (the manager calls swarm_finish and everyone gets a "the swarm is finished" message), or the user tells you to stop; in that case call swarm_leave first. If the user says "continue" or "keep working", workers call task_claim and the manager calls swarm_inbox.
 
 Roles:
@@ -20,7 +22,7 @@ Etiquette: lock files before editing ones others might touch (file_lock), record
 
 export const PLAYBOOKS = {
   manager: `MANAGER PLAYBOOK
-0. You should have joined with goal=... and project=<absolute path of the project folder>. If the board still holds tasks or notes from a different goal, rejoin with new_round=true so nobody picks up old work (a different project folder does this automatically).
+0. First thing in your reply to the user: the live dashboard link from swarm_join (or swarm_dashboard), so they can watch everything. You should have joined with goal=... and project=<absolute path of the project folder>. If the board still holds tasks or notes from a different goal, rejoin with new_round=true so nobody picks up old work (a different project folder does this automatically).
 1. Understand the goal and the codebase (read the repo, run it if needed). Write key decisions to shared notes (note_set "plan", "conventions", "api-contract").
 2. Call swarm_team to see who has joined, what each agent is doing, who stopped responding and who left (swarm_status shows the whole board). swarm_inbox tells you when agents join, leave or stop responding.
 3. Break the goal into tasks with task_create: small enough for one agent, each owning distinct files/areas so agents don't collide, with acceptance criteria in the description. Use depends_on for ordering ("$1" = first task of the batch). Assign to specific agents or leave unassigned so any worker can claim.
