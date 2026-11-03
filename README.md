@@ -156,7 +156,10 @@ The shell fallback uses the folder it runs in. A subfolder finds its project's b
 
 - **Fresh rounds.** On the same board, a manager with a new goal after the swarm finished closes the old round on its own: open tasks are cancelled, notes archived, and locks and pending replies cleared. A different goal while work is still open only gets a warning, and the manager confirms with `new_round=true`, so a restarted manager can't wipe a live board by accident.
 - **One manager.** A second agent joining as manager is refused unless it passes `force=true`, which it should only do if you asked for two managers.
-- **Progress heartbeat.** Workers post `task_update(progress=…, eta=…)` about every 10 minutes and get a reminder if they forget.
+- **Progress updates.** Workers post `task_update(progress=…, eta=…, note=…)` about every 5 minutes and after each meaningful step:
+  - after 5 minutes without one, they get a "PROGRESS CHECK" reminder
+  - after 10 minutes, their other tools are paused until they post: the acting swarm tools in any app, and every tool in apps with the hooks. Posting progress is always allowed, and it takes one call.
+- **Automatic activity.** In apps with the hooks, every tool an agent uses is recorded, such as an edit, a file read or a shell command. The dashboard shows each agent's last action and each task's activity trail, so you can see real work even before the agent reports.
 - **Auto-return.** A task whose holder has been silent for 20 minutes goes back on the board for anyone to claim, and the holder is told. With the hooks, any tool use counts as activity, so an agent busy editing never loses its task.
 - **Changed files.** When a task is marked done or sent to review, the files it changed are recorded in its result. These come from its own file locks plus what git saw change since the task was claimed. Reviewers and the report show them.
 
@@ -274,7 +277,7 @@ Optional env vars:
 - `SWARM_WAIT_SECONDS`: a fixed wait for `task_claim`, `swarm_inbox` and `file_lock`, which turns off the learning. The shell fallback uses 90s by default. `SWARM_MAX_WAIT_SECONDS`: the most it will ever learn (1800).
 - `SWARM_IDLE_SECONDS`: how long an agent with no task and no wait counts as active before it's shown as stopped (90).
 - `SWARM_REASSIGN_MINUTES`: how long a task holder can be silent before its task goes back on the board (20).
-- `SWARM_HEARTBEAT_MINUTES`: how often workers are reminded to post progress (10).
+- `SWARM_HEARTBEAT_MINUTES`: how often workers must post progress (5). They're reminded after this, and paused after twice this.
 - `SWARM_PROJECT`: the project folder to use when an agent doesn't pass one.
 - `SWARM_DASHBOARD_PORT`: the dashboard's port (56432).
 - `SWARM_MCP_HOME`: where the global board, learned waits and the list of project boards live (`~/.swarm-mcp`).

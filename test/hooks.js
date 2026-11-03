@@ -98,6 +98,34 @@ assert.match(cli("call", "swarm_finish", "--as", "boss", "--summary", "Docs ship
 assert.equal(stop("s1"), null);
 assert.equal(stop("m1"), null);
 
+// --- activity trail and required progress (heartbeat cut to 1.2 s, so overdue after 2.4 s) ---
+const fast = { ...process.env, SWARM_HEARTBEAT_MINUTES: "0.02" };
+const cliF = (...args) => {
+  const r = spawnSync(process.execPath, [entry, ...args, "--swarm", "beat"], { encoding: "utf8", cwd: home, env: fast });
+  return { out: r.stdout.trim(), code: r.status };
+};
+const hookF = (kind, input) => execFileSync(process.execPath, [entry, "hook", kind], { input: JSON.stringify(input), encoding: "utf8", env: fast }).trim();
+cliF("call", "swarm_join", "--as", "boss", "--role", "manager", "--goal", "Beat");
+cliF("call", "task_create", "--as", "boss", '{"tasks":[{"title":"Style it","assignee":"w9"}]}');
+cliF("call", "task_claim", "--as", "w9");
+hookF("post-tool", { session_id: "s9", tool_name: "mcp__swarm__swarm_join", tool_input: { name: "w9", role: "worker", swarm: "beat" }, tool_response: 'Joined as "w9"' });
+// Each tool the agent uses lands on its task's trail and as its last action, with no effort from the agent.
+hookF("post-tool", { session_id: "s9", tool_name: "Edit", tool_input: { file_path: "src/a.css" } });
+const beat = () => JSON.parse(fs.readFileSync(path.join(process.env.SWARM_MCP_HOME, "beat.json"), "utf8"));
+assert.deepEqual(beat().tasks[0].trail.map((t) => [t.tool, t.target]), [["Edit", "src/a.css"]]);
+assert.equal(beat().agents.w9.lastAction.target, "src/a.css");
+// Long overdue on progress: other tools are paused (hook) and so are acting swarm tools (server)...
+await new Promise((r) => setTimeout(r, 2800));
+const paused = JSON.parse(hookF("pre-tool", { session_id: "s9", tool_name: "Edit", tool_input: { file_path: "src/b.css" } }));
+assert.match(paused.hookSpecificOutput.permissionDecisionReason, /PROGRESS UPDATE REQUIRED: nothing posted on #1 "Style it"/);
+assert.equal(hookF("pre-tool", { session_id: "s9", tool_name: "mcp__swarm__task_update", tool_input: {} }), "");
+const refused = cliF("call", "note_set", "--as", "w9", "--key", "k", "--value", "v");
+assert.equal(refused.code, 1);
+assert.match(refused.out, /PROGRESS UPDATE REQUIRED/);
+// ...until it posts progress, which is always allowed.
+assert.match(cliF("call", "task_update", "--as", "w9", "--task_id", "1", "--progress", "40", "--eta", "5 min", "--note", "base styles done").out, /in_progress 40%/);
+assert.equal(hookF("pre-tool", { session_id: "s9", tool_name: "Edit", tool_input: { file_path: "src/b.css" } }), "", "still paused after posting");
+
 // --- installer extras ---
 fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
 fs.mkdirSync(path.join(home, ".codex"), { recursive: true });

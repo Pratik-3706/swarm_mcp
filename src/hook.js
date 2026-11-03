@@ -15,7 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BOARD_DIR, SwarmStore, deliveryText, detectProject, owedReplies, replyRequiredText, swarmHome, unreadMessages } from "./store.js";
-import { heartbeatDue, heartbeatText } from "./board.js";
+import { actionOf, heartbeatDue, heartbeatText, progressOverdue, progressRequiredText } from "./board.js";
 
 // The swarm counts as abandoned after this long without any activity; then nobody is held back.
 const QUIET_LIMIT_MS = 2 * 60 * 60_000;
@@ -103,19 +103,32 @@ async function takeUnread(session) {
 
 // After any tool the agent uses (an edit, a shell command...): hand it messages that arrived meanwhile, so
 // teammates reach it mid-task; nudge it to post progress when its task has gone quiet; and, at most once a
-// minute, mark it as seen, so an agent busy editing never looks silent and loses its task.
-async function afterTool(session, event) {
+// minute, mark it as seen, so an agent busy editing never looks silent and loses its task. It also records
+// what the agent did (at most every 10 seconds) as its last action and on its task's trail, so the dashboard
+// shows real activity even from an agent that never posts progress itself.
+async function afterTool(session, event, input) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return;
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
   const store = new SwarmStore(link.swarm, { project: link.project });
   const stale = Date.now() - Date.parse(link.touchedAt || 0) > 60_000;
+  const tool = String(pick(input, "tool_name", "toolName", "name") || "");
+  let args = pick(input, "tool_input", "toolInput", "arguments", "input") || {};
+  if (typeof args === "string") args = { command: args };
+  const record = tool && !/swarm/i.test(tool) && !shellCall(args.command) && Date.now() - Date.parse(link.actionAt || 0) > 10_000;
   const pending = await store.view((state) => unreadMessages(state, link.name).length || heartbeatDue(state, link.name));
-  if (!pending && !stale) return;
+  if (!pending && !stale && !record) return;
   const parts = await store.update((state) => {
     const agent = state.agents[link.name];
     if (!agent) return [];
-    agent.lastSeen = new Date().toISOString();
+    const at = new Date().toISOString();
+    agent.lastSeen = at;
+    if (record) {
+      const action = { at, ...actionOf(tool, args) };
+      agent.lastAction = action;
+      const task = state.tasks.find((t) => t.assignee === link.name && t.status === "in_progress");
+      if (task) task.trail = [...(task.trail || []), action].slice(-30);
+    }
     const out = [];
     const messages = unreadMessages(state, link.name);
     agent.msgCursor = state.seq.message;
@@ -127,22 +140,27 @@ async function afterTool(session, event) {
     }
     return out;
   });
-  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), touchedAt: new Date().toISOString() }));
+  const now = new Date().toISOString();
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), touchedAt: now, ...(record ? { actionAt: now } : {}) }));
   if (parts.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: parts.join("\n\n") } }));
 }
 
-// Before each tool: while the agent owes a reply, only swarm tools (MCP, or the shell fallback) may run.
+// Before each tool: while the agent owes a reply, or is long overdue on a progress update, only swarm tools
+// (MCP, or the shell fallback) may run. Replying and posting progress are always allowed.
 async function gateTool(input, session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return;
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const owed = await new SwarmStore(link.swarm, { project: link.project }).view((state) => owedReplies(state, link.name));
-  if (!owed.length) return;
+  const { owed, overdue } = await new SwarmStore(link.swarm, { project: link.project }).view((state) => ({
+    owed: owedReplies(state, link.name),
+    overdue: progressOverdue(state, link.name),
+  }));
+  if (!owed.length && !overdue) return;
   const tool = String(pick(input, "tool_name", "toolName", "name") || "");
   let args = pick(input, "tool_input", "toolInput", "arguments", "input") || {};
   if (typeof args === "string") args = { command: args };
-  if (/swarm/i.test(tool) || shellCall(args.command)) return; // replying (and reading) is always allowed
-  const reason = replyRequiredText(owed);
+  if (/swarm/i.test(tool) || shellCall(args.command)) return;
+  const reason = owed.length ? replyRequiredText(owed) : progressRequiredText(overdue);
   process.stdout.write(
     JSON.stringify({
       decision: "block",
@@ -240,7 +258,7 @@ export async function runHook(kind) {
     if (kind === "pre-tool") await gateTool(input, session);
     else if (kind === "post-tool") {
       recordJoin(input, session);
-      await afterTool(session, pick(input, "hook_event_name", "hookEventName") || "PostToolUse");
+      await afterTool(session, pick(input, "hook_event_name", "hookEventName") || "PostToolUse", input);
     }
     else if (kind === "stop") await decideStop(session);
   } catch {

@@ -11,8 +11,9 @@ import { pushEvent } from "./store.js";
 
 // A task whose holder has made no swarm call (and, with the hooks, used no tool) for this long goes back on the board.
 export const REASSIGN_MS = (Number(process.env.SWARM_REASSIGN_MINUTES) || 20) * 60_000;
-// Workers post progress at least this often; past it they get a reminder.
-export const HEARTBEAT_MS = (Number(process.env.SWARM_HEARTBEAT_MINUTES) || 10) * 60_000;
+// Workers post progress at least this often; past it they get a reminder, and at twice it (with the hooks)
+// their other tools are paused until they post one.
+export const HEARTBEAT_MS = (Number(process.env.SWARM_HEARTBEAT_MINUTES) || 5) * 60_000;
 
 const OPEN = (t) => !["done", "cancelled"].includes(t.status);
 const nowIso = () => new Date().toISOString();
@@ -26,6 +27,22 @@ export function heartbeatDue(state, name) {
   if (!agent || !task) return null;
   const since = (iso) => Date.now() - Date.parse(iso || 0);
   return since(task.progressAt || task.claimedAt || task.updatedAt) > HEARTBEAT_MS && since(agent.heartbeatAskedAt) > HEARTBEAT_MS ? task : null;
+}
+
+/** The task this agent has gone far too long without reporting on (twice the heartbeat), or null. */
+export function progressOverdue(state, name) {
+  const task = state.tasks.find((t) => t.assignee === name && t.status === "in_progress");
+  if (!task) return null;
+  return Date.now() - Date.parse(task.progressAt || task.claimedAt || task.updatedAt) > 2 * HEARTBEAT_MS ? task : null;
+}
+
+export const progressRequiredText = (task) =>
+  `PROGRESS UPDATE REQUIRED: nothing posted on #${task.id} "${task.title}" for over ${Math.round((2 * HEARTBEAT_MS) / 60_000)} minutes, so your other tools are paused until you post one. It takes one call: task_update(task_id=${task.id}, progress=<0-100>, eta="<time left>", note="what you've done and what's next"). Then carry on.`;
+
+/** One entry in a task's activity trail: what the agent just did, e.g. { tool: "Edit", target: "src/app.css" }. */
+export function actionOf(tool, args = {}) {
+  const target = args.file_path || args.path || args.filePath || args.TargetFile || args.command || args.CommandLine || args.pattern || args.url || args.query || "";
+  return { tool: String(tool), target: String(target).replace(/\s+/g, " ").slice(0, 120) };
 }
 
 export const heartbeatText = (task) =>

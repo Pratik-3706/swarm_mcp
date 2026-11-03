@@ -23,6 +23,8 @@ import {
   changedFiles,
   heartbeatDue,
   heartbeatText,
+  progressOverdue,
+  progressRequiredText,
   isWaiting,
   projectPath,
   returnStalledTasks,
@@ -245,6 +247,7 @@ export function snapshot(state) {
         unread: unreadMessages(state, a.name).length,
         owes: owedReplies(state, a.name).map((m) => m.id),
         heartbeatAskedAt: a.heartbeatAskedAt || null,
+        lastAction: a.lastAction || null,
         task: t && { id: t.id, title: t.title, progress: t.progress ?? 0, eta: t.eta, progressAt: t.progressAt, claimedAt: t.claimedAt },
       };
     }),
@@ -266,6 +269,7 @@ export function snapshot(state) {
       createdAt: t.createdAt,
       claimedAt: t.claimedAt || null,
       progressAt: t.progressAt || null,
+      trail: t.trail || [],
       updatedAt: t.updatedAt,
     })),
     locks: Object.entries(state.locks).map(([p, l]) => ({ path: p, by: l.by, taskId: l.taskId, at: l.at })),
@@ -494,10 +498,13 @@ export function createServer() {
 
   // Tools that act (claim, update, create, lock, write notes, finish) are refused while the agent owes
   // a reply, so a message can't be ignored. Reading and message_send stay open, so it can always answer.
+  // Likewise while its task is long overdue on a progress update, except for the task_update that posts it.
   const gatedTool = (fn) =>
     tool(async (args, s, extra) => {
-      const owed = await s.store.view((state) => owedReplies(state, s.name));
-      if (!owed.length) return fn(args, s, extra);
+      const { owed, overdue } = await s.store.view((state) => ({ owed: owedReplies(state, s.name), overdue: progressOverdue(state, s.name) }));
+      const postsProgress = args.progress != null || args.eta || args.note || args.status;
+      if (!owed.length && (!overdue || postsProgress)) return fn(args, s, extra);
+      if (!owed.length) return fail(progressRequiredText(overdue));
       await s.store.update((state) => state.agents[s.name] && takeMessages(state, s.name));
       return fail(replyRequiredText(owed));
     });
@@ -878,7 +885,7 @@ export function createServer() {
     {
       title: "Update a task",
       description:
-        "Change a task's status, post progress (% done and an ETA, about every 10 minutes while you work), add a note, record the result, or (re)assign it. Statuses: todo, in_progress, blocked, review, done, cancelled. When finishing, set status 'done' (or 'review' if a reviewer should check it) and put a concise summary in result; the files the task changed are recorded automatically.",
+        "Change a task's status, post progress (% done, an ETA and a note, about every 5 minutes and after each meaningful step; after 10 minutes without one your other tools are paused), add a note, record the result, or (re)assign it. Statuses: todo, in_progress, blocked, review, done, cancelled. When finishing, set status 'done' (or 'review' if a reviewer should check it) and put a concise summary in result; the files the task changed are recorded automatically.",
       inputSchema: {
         task_id: z.number().int(),
         status: z.enum(TASK_STATUSES).optional(),

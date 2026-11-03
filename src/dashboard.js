@@ -12,6 +12,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { SwarmStore, listProjects, listSwarms, swarmHome } from "./store.js";
+import { HEARTBEAT_MS } from "./board.js";
 
 export const DASHBOARD_PORT = Number(process.env.SWARM_DASHBOARD_PORT) || 56432;
 const ENTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.js");
@@ -82,7 +83,7 @@ export async function startDashboard({ swarm = "default", project = null, open =
         };
         return send(res, 200, "application/json", JSON.stringify({ ...snapshot(state), system }));
       }
-      if (u.pathname === "/") return send(res, 200, "text/html; charset=utf-8", PAGE);
+      if (u.pathname === "/") return send(res, 200, "text/html; charset=utf-8", PAGE.replace("__HEARTBEAT__", String(HEARTBEAT_MS)));
       send(res, 404, "text/plain", "Not found");
     } catch (err) {
       send(res, 500, "application/json", JSON.stringify({ error: err.message }));
@@ -308,6 +309,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const rel = (iso) => { if (!iso) return "—"; const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); return s < 60 ? s + "s" : s < 3600 ? Math.round(s / 60) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d"; };
 const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour12: false });
+const HEARTBEAT = __HEARTBEAT__; // ms; past twice this an agent's progress counts as overdue
 const INKS = ["#c2410c", "#3f6b3a", "#9f1239", "#0f766e", "#a16207", "#6b4f2a", "#7c2d12", "#57534e"];
 const colorOf = (name) => { let h = 0; for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return name === "swarm" ? "var(--mute)" : INKS[h % INKS.length]; };
 const GLYPH = { join: "→", leave: "←", task_created: "+", task_claimed: "▸", task_done: "✓", task_review: "◇", task_blocked: "!", task_cancelled: "×", task_todo: "↺", task_returned: "↺", task_updated: "·", message: "✉", lock: "⌗", unlock: "⌗", note: "¶", round: "↻", finish: "■", update: "⇡" };
@@ -380,7 +382,13 @@ function crew(d) {
     const job = a.task
       ? '<div class="t"><span class="mono">#' + a.task.id + "</span> " + esc(a.task.title) + '</div><div class="rule"><i style="width:' + a.task.progress + '%"></i></div><div class="d num">' + a.task.progress + "%" + (a.task.eta ? " · eta " + esc(a.task.eta) : "") + " · claimed " + rel(a.task.claimedAt) + " ago · last update " + rel(a.task.progressAt) + " ago</div>"
       : '<div class="d">' + esc(a.state) + (a.waitingUntil ? " · waiting in a call until " + clock(a.waitingUntil) : "") + "</div>";
-    const extra = [a.owes.length ? '<span class="owe">owes a reply to ' + a.owes.map((n) => "#" + n).join(", ") + "</span>" : "", a.unread ? a.unread + " unread" : ""].filter(Boolean).join(" · ");
+    const overdue = a.task && Date.now() - Date.parse(a.task.progressAt || a.task.claimedAt) > 2 * HEARTBEAT;
+    const extra = [
+      a.lastAction ? 'last action <span class="mono">' + esc(a.lastAction.tool) + "</span> " + esc(a.lastAction.target) + " · " + rel(a.lastAction.at) + " ago" : "",
+      overdue ? '<span class="owe">progress update overdue</span>' : "",
+      a.owes.length ? '<span class="owe">owes a reply to ' + a.owes.map((n) => "#" + n).join(", ") + "</span>" : "",
+      a.unread ? a.unread + " unread" : "",
+    ].filter(Boolean).join(" · ");
     return '<div class="lane"><div class="who"><b><span class="sw" style="background:' + colorOf(a.name) + '"></span>' + esc(a.name) + '</b><span class="cap">' + esc(a.role) + (a.client ? " · " + esc(a.client) : "") + '</span></div><div class="state ' + a.presence + '">' + a.presence.toUpperCase() + '</div><div class="job">' + job + (extra ? '<div class="d">' + extra + "</div>" : "") + '</div><div class="strip" title="activity, last hour"><svg viewBox="0 0 128 26" preserveAspectRatio="none"><line x1="0" y1="25.5" x2="128" y2="25.5"/>' + bars + '</svg></div><div class="seen num" title="last seen">' + rel(a.lastSeen) + "</div></div>";
   }).join("") || '<div class="empty">Nobody has joined this board yet.</div>';
 }
@@ -396,6 +404,7 @@ function ledger(d) {
       (x.dependsOn.length ? "<dt>Depends on</dt><dd class=mono>" + x.dependsOn.map((n) => "#" + n).join(", ") + "</dd>" : "") +
       (x.result ? "<dt>Result</dt><dd>" + esc(x.result) + "</dd>" : "") +
       (x.files.length ? "<dt>Files</dt><dd><ul>" + x.files.map((f) => "<li><code>" + esc(f) + "</code></li>").join("") + "</ul></dd>" : "") +
+      (x.trail.length ? "<dt>Activity</dt><dd><ul>" + [...x.trail].reverse().slice(0, 15).map((t) => '<li><span class="tiny num">' + clock(t.at) + '</span> <span class="mono">' + esc(t.tool) + "</span> " + esc(t.target) + "</li>").join("") + "</ul></dd>" : "") +
       (x.notes.length ? "<dt>Notes</dt><dd><ul>" + x.notes.map((n) => "<li><span class=tiny>" + esc(n.by) + " · " + rel(n.at) + " ago</span><br>" + esc(n.text) + "</li>").join("") + "</ul></dd>" : "") +
       "</dl></td></tr>";
     return html;
