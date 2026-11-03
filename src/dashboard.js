@@ -77,6 +77,7 @@ export async function startDashboard({ swarm = "default", project = null, open =
           board: store.file,
           serverTime: new Date().toISOString(),
           clients: readJson(path.join(swarmHome(), "clients.json")) || {},
+          hooks: readJson(path.join(swarmHome(), "hooks-seen.json")) || {},
           update: readJson(path.join(swarmHome(), "update-check.json")),
         };
         return send(res, 200, "application/json", JSON.stringify({ ...snapshot(state), system }));
@@ -458,8 +459,12 @@ function side(d) {
     ["swarm-mcp", up ? (up.behind ? up.behind + " update(s) available" : "up to date") + " · checked " + rel(up.checkedAt) + " ago" : "not checked yet"],
   ];
   $("engine").innerHTML = rows.map(([k, v]) => "<dt>" + k + "</dt><dd>" + esc(v) + "</dd>").join("");
+  const hooks = Object.entries(s.hooks || {});
+  const hookHtml = '<div class="cap" style="margin:8px 0 2px">Hooks actually running</div><dl class="kv">' +
+    (hooks.length ? hooks.map(([app, h]) => "<dt>" + esc(app) + "</dt><dd>" + Object.keys(h.kinds).join(", ") + " · " + rel(h.lastAt) + " ago" + (h.hasSession ? "" : " · no conversation id!") + "</dd>").join("") : "<dt>none yet</dt><dd>no app has run a swarm hook</dd>") +
+    '</dl><div class="tiny" style="margin-bottom:8px">An app missing here doesn\'t run the hooks: its busy agents only get messages at their next swarm call.</div>';
   const clients = Object.entries(s.clients);
-  $("clients").innerHTML = clients.length ? '<div class="cap" style="margin:8px 0 2px">Learned wait per app</div><dl class="kv">' + clients.map(([name, c]) => "<dt>" + esc(name) + "</dt><dd>" + (c.normal || 45) + "s" + (c.limit ? " · cap " + c.limit + "s" : "") + (c.lastCancel ? " · cancelled at " + c.lastCancel + "s" : "") + "</dd>").join("") + "</dl>" : "";
+  $("clients").innerHTML = hookHtml + (clients.length ? '<div class="cap" style="margin:8px 0 2px">Learned wait per app</div><dl class="kv">' + clients.map(([name, c]) => "<dt>" + esc(name) + "</dt><dd>" + (c.normal || 45) + "s" + (c.limit ? " · cap " + c.limit + "s" : "") + (c.lastCancel ? " · cancelled at " + c.lastCancel + "s" : "") + "</dd>").join("") + "</dl>" : "");
 }
 
 loadBoards(); load();

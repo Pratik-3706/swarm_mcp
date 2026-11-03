@@ -193,9 +193,48 @@ async function decideStop(session) {
   process.stdout.write(JSON.stringify({ decision: "block", reason }));
 }
 
+/** Which app ran a hook, guessed from where it keeps its transcripts. */
+function appOf(input) {
+  const where = `${pick(input, "transcript_path", "transcriptPath") || ""} ${process.env.SWARM_CLIENT || ""}`.toLowerCase();
+  if (where.includes(".claude")) return "Claude Code";
+  if (where.includes(".codex") || where.includes("codex")) return "Codex";
+  if (where.includes(".gemini") || where.includes("antigravity")) return "Antigravity";
+  return "unknown app";
+}
+
+/**
+ * Note that an app really runs our hooks, and what it sends, for the dashboard. An app that never shows up
+ * here doesn't run them, so busy agents in it only get messages when they make a swarm call.
+ * At most one write per app and hook kind every 30 seconds.
+ */
+function noteHookSeen(kind, input, session) {
+  try {
+    const file = path.join(swarmHome(), "hooks-seen.json");
+    let all = {};
+    try {
+      all = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      // first one
+    }
+    const app = appOf(input);
+    const entry = (all[app] ||= { kinds: {} });
+    if (entry.kinds[kind] && Date.now() - Date.parse(entry.kinds[kind]) < 30_000) return;
+    entry.kinds[kind] = new Date().toISOString();
+    entry.lastAt = entry.kinds[kind];
+    entry.fields = Object.keys(input).slice(0, 20);
+    entry.hasSession = !!session;
+    if (kind !== "stop") entry.lastTool = String(pick(input, "tool_name", "toolName", "name") || "");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(all, null, 2));
+  } catch {
+    // diagnostics only
+  }
+}
+
 export async function runHook(kind) {
   const input = readInput();
-  const session = pick(input, "session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId");
+  const session = pick(input, "session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId", "cascade_id", "cascadeId");
+  noteHookSeen(kind, input, session);
   if (!session) return;
   try {
     if (kind === "pre-tool") await gateTool(input, session);
