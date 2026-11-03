@@ -7,6 +7,7 @@ import {
   deliveryText,
   existingBoardRoot,
   listProjects,
+  openBoard,
   owedReplies,
   pushEvent,
   replyRequiredText,
@@ -393,7 +394,7 @@ export function createServer() {
     // Which project's board: the folder the agent names, else its app's workspace, else a board already
     // set up above the folder this server runs in. With none of those it's the global board.
     const wanted = project || process.env.SWARM_PROJECT || (await clientRoot()) || existingBoardRoot(process.cwd());
-    const store = new SwarmStore(swarm || process.env.SWARM_NAME || "default", { project: wanted });
+    const store = await openBoard(swarm || process.env.SWARM_NAME || "default", wanted);
     name = name.trim().toLowerCase().replace(/\s+/g, "-");
     project = store.project || projectPath(wanted);
     const isManager = role.toLowerCase() === "manager";
@@ -490,6 +491,8 @@ export function createServer() {
   const tool = (fn) => async (args, extra) => {
     try {
       const s = await requireJoin();
+      // If this board moved into its project (see openBoard), carry on there.
+      s.store = await openBoard(s.store.swarm, s.store.root ? s.store.project : null);
       return withMessages(s, await fn(args, s, extra));
     } catch (err) {
       return fail(err.message);

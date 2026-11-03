@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { BOARD_DIR, SwarmStore, deliveryText, detectProject, owedReplies, replyRequiredText, swarmHome, unreadMessages } from "./store.js";
+import { BOARD_DIR, SwarmStore, deliveryText, detectProject, followMove, owedReplies, replyRequiredText, swarmHome, unreadMessages } from "./store.js";
 import { actionOf, heartbeatDue, heartbeatText, progressOverdue, progressRequiredText } from "./board.js";
 
 // The swarm counts as abandoned after this long without any activity; then nobody is held back.
@@ -92,7 +92,7 @@ async function takeUnread(session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return [];
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const store = new SwarmStore(link.swarm, { project: link.project });
+  const store = (await followMove(new SwarmStore(link.swarm, { project: link.project })));
   if (!(await store.view((state) => unreadMessages(state, link.name).length))) return [];
   return store.update((state) => {
     const messages = unreadMessages(state, link.name);
@@ -110,7 +110,7 @@ async function afterTool(session, event, input) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return;
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const store = new SwarmStore(link.swarm, { project: link.project });
+  const store = (await followMove(new SwarmStore(link.swarm, { project: link.project })));
   const stale = Date.now() - Date.parse(link.touchedAt || 0) > 60_000;
   const tool = String(pick(input, "tool_name", "toolName", "name") || "");
   let args = pick(input, "tool_input", "toolInput", "arguments", "input") || {};
@@ -151,7 +151,7 @@ async function gateTool(input, session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return;
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const { owed, overdue } = await new SwarmStore(link.swarm, { project: link.project }).view((state) => ({
+  const { owed, overdue } = await (await followMove(new SwarmStore(link.swarm, { project: link.project }))).view((state) => ({
     owed: owedReplies(state, link.name),
     overdue: progressOverdue(state, link.name),
   }));
@@ -174,7 +174,7 @@ async function decideStop(session) {
   const file = sessionFile(session);
   if (!fs.existsSync(file)) return; // this conversation never joined a swarm
   const link = JSON.parse(fs.readFileSync(file, "utf8"));
-  const state = await new SwarmStore(link.swarm, { project: link.project }).view();
+  const state = await (await followMove(new SwarmStore(link.swarm, { project: link.project }))).view();
   const agent = state.agents[link.name];
   const lastActivity = Date.parse(state.events.at(-1)?.at || state.createdAt);
   const owed = agent ? owedReplies(state, link.name) : [];
@@ -183,6 +183,8 @@ async function decideStop(session) {
     fs.rmSync(file, { force: true });
     return;
   }
+  // A manager with no goal and no tasks yet has to ask the user for the goal: that needs its turn to end.
+  if (agent.role.toLowerCase() === "manager" && !state.goal && !state.tasks.length && !owed.length) return;
   // Loop guard: if the agent made no swarm call since the last block, it can't (or won't) use the tools.
   if (link.blockedAt && agent.lastSeen <= link.blockedAt) link.strikes = (link.strikes || 0) + 1;
   else link.strikes = 0;

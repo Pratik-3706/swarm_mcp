@@ -77,6 +77,42 @@ export function existingBoardRoot(p) {
   }
 }
 
+const sameRoot = (a, b) => !!a && !!b && (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+
+/**
+ * Open the board an agent should be on, so that agents of one project always meet, whatever their app reports.
+ * Boards made before project boards existed sit in the global file with `project` set. The first time that
+ * project's own board is opened while still empty, the global board moves into it, and the global file then
+ * points there (movedTo). An agent that asks for the global board (its app doesn't say which folder it is in)
+ * follows that pointer, or the old board's project, to the same place.
+ */
+export async function openBoard(swarm, project = null) {
+  const store = new SwarmStore(swarm, { project });
+  const global = store.root ? new SwarmStore(swarm) : store;
+  const g = await global.view();
+  if (!store.root) {
+    const dest = g.movedTo || g.project;
+    return dest && fs.existsSync(dest) ? openBoard(swarm, dest) : store;
+  }
+  if (g.movedTo || !sameRoot(g.project, store.project)) return store;
+  const moved = await store.update((s) => {
+    if (s.goal || s.tasks.length || s.messages.length) return false; // the project board is in use: leave both
+    const here = s.agents;
+    Object.assign(s, structuredClone(g), { project: store.project, movedFrom: global.file });
+    s.agents = { ...here, ...g.agents };
+    return true;
+  });
+  if (moved) await global.update((s) => void (s.movedTo = store.project));
+  return store;
+}
+
+/** The global board after it moved into a project: that project's board. Anything else: unchanged. */
+export async function followMove(store) {
+  if (store.root) return store;
+  const dest = await store.view((s) => s.movedTo);
+  return dest && fs.existsSync(dest) ? new SwarmStore(store.swarm, { project: dest }) : store;
+}
+
 /** For a shell's current folder: the board root above it, else its git root, else null (use the global board). */
 export function detectProject(p) {
   if (!p) return null;

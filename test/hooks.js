@@ -98,6 +98,11 @@ assert.match(cli("call", "swarm_finish", "--as", "boss", "--summary", "Docs ship
 assert.equal(stop("s1"), null);
 assert.equal(stop("m1"), null);
 
+// A manager on a board with no goal and no tasks may stop: it has to ask the user for the goal.
+cli("call", "swarm_join", "--as", "lead", "--role", "manager", "--swarm", "empty");
+hook("post-tool", { session_id: "m2", tool_name: "mcp__swarm__swarm_join", tool_input: { name: "lead", role: "manager", swarm: "empty" }, tool_response: 'Joined as "lead"' });
+assert.equal(stop("m2"), null, "manager on an empty board was kept from asking for the goal");
+
 // --- activity trail and required progress (heartbeat cut to 1.2 s, so overdue after 2.4 s) ---
 const fast = { ...process.env, SWARM_HEARTBEAT_MINUTES: "0.02" };
 const cliF = (...args) => {

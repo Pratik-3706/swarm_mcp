@@ -117,6 +117,29 @@ try {
   assert.match(fs.readFileSync(boardFile, "utf8"), /"goal": "Build v2"/);
   await mgr.call("message_send", { to: "nobody-yet", content: "hello" });
 
+  // --- a board from before project boards: it moves into its project, and everyone meets there ---
+  process.env.SWARM_MCP_HOME = env.SWARM_MCP_HOME;
+  const { SwarmStore } = await import("../src/store.js");
+  const legacyProject = path.join(home, "legacy-proj");
+  fs.mkdirSync(legacyProject);
+  const at = new Date().toISOString();
+  await new SwarmStore("legacy").update((s) => {
+    s.goal = "Furina site";
+    s.project = legacyProject.split(path.sep).join("/");
+    s.seq.task = 1;
+    s.tasks.push({ id: 1, title: "Old work", status: "in_progress", assignee: "ant", dependsOn: [], notes: [], priority: "normal", createdBy: "boss", createdAt: at, updatedAt: at, claimedAt: at, progressAt: at });
+    s.agents.ant = { name: "ant", role: "worker", client: "Antigravity", joinedAt: at, lastSeen: at, status: "online", msgCursor: 0, eventCursor: 0 };
+  });
+  // The manager's app reports the project folder: the old board comes along instead of a blank one.
+  const moved = await mgr.call("swarm_join", { name: "boss", role: "manager", swarm: "legacy", project: legacyProject });
+  assert.match(moved, /Board: .*legacy-proj[\\/]\.swarm[\\/]legacy\.json/);
+  assert.match(moved, /#1 \[in_progress\] Old work @ant/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(env.SWARM_MCP_HOME, "legacy.json"), "utf8")).movedTo, legacyProject.split(path.sep).join("/"));
+  // A worker whose app doesn't say where it is follows the global board's pointer to the same board.
+  assert.match(await w1.call("swarm_join", { name: "ant", role: "worker", swarm: "legacy" }), /Board: .*legacy-proj[\\/]\.swarm[\\/]legacy\.json[\s\S]*You have #1 in progress/);
+  await w1.call("message_send", { to: "boss", content: "Old work is in review" });
+  assert.match(await mgr.call("swarm_inbox", { wait_seconds: 0 }), /ant -> boss: Old work is in review/);
+
   // --- dashboard ---
   const dash = spawn(process.execPath, [entry, "dashboard", "--no-open"], { env, cwd: home, stdio: ["ignore", "pipe", "pipe"] });
   try {

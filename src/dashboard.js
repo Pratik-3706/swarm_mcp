@@ -11,7 +11,7 @@ import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { SwarmStore, listProjects, listSwarms, swarmHome } from "./store.js";
+import { SwarmStore, followMove, listProjects, listSwarms, swarmHome } from "./store.js";
 import { HEARTBEAT_MS } from "./board.js";
 
 export const DASHBOARD_PORT = Number(process.env.SWARM_DASHBOARD_PORT) || 56432;
@@ -72,7 +72,7 @@ export async function startDashboard({ swarm = "default", project = null, open =
       if (u.pathname === "/api/health") return send(res, 200, "application/json", '{"swarm":true}');
       if (u.pathname === "/api/boards") return send(res, 200, "application/json", JSON.stringify(boards()));
       if (u.pathname === "/api") {
-        const store = new SwarmStore(u.searchParams.get("swarm") || "default", { project: u.searchParams.get("project") || null });
+        const store = await followMove(new SwarmStore(u.searchParams.get("swarm") || "default", { project: u.searchParams.get("project") || null }));
         const state = await store.view();
         const system = {
           board: store.file,
