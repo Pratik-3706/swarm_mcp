@@ -167,7 +167,13 @@ try {
   await sleep(2500); // antigravity goes quiet, as if its turn ended
   const assignedToIdle = await mgr.call("task_create", { tasks: [{ title: "Polish", assignee: "antigravity" }] });
   assert.match(assignedToIdle, /antigravity is idle .* won't see new tasks/);
-  assert.match(await mgr.call("swarm_inbox", { wait_seconds: 0 }), /Needs attention:\n {2}antigravity has stopped .*#5 is assigned to it/);
+  const attention = await mgr.call("swarm_inbox", { wait_seconds: 0 });
+  assert.match(attention, /Needs attention:[\s\S]*antigravity has stopped responding[\s\S]*antigravity has stopped \(idle .*#5 is assigned to it/);
+  // The roster groups agents by what they are doing.
+  const team = await mgr.call("swarm_team");
+  assert.match(team, /3 agent\(s\) joined swarm "default"/);
+  assert.match(team, /Stopped responding \(need a nudge from the user\)[\s\S]*- antigravity \(worker, Antigravity\)/);
+  assert.match(team, /Recent joins and leaves:[\s\S]*antigravity joined as worker/);
   assert.doesNotMatch(await mgr.call("swarm_inbox", { wait_seconds: 0 }), /Needs attention/, "alert repeated");
 
   // Wait learning rules (waits.js): grow after full waits, back off below cancels, cap after a repeat.

@@ -166,6 +166,7 @@ Each swarm has a name (default `default`). Use a different one per project, for 
 | Tool | What it does |
 |---|---|
 | `swarm_join` | Join with a name, role and `project` folder; returns the team, the board and your playbook. Managers pass `goal`, and `new_round` to close a previous goal's leftovers |
+| `swarm_team` | The roster: who joined, who's working on what (with % and ETA), who's waiting, who stopped responding, who left, plus recent joins and leaves. The manager is also alerted in `swarm_inbox` when an agent stops responding |
 | `swarm_report` | Plain-English status for the user. `dashboard=true` also opens the live dashboard |
 | `swarm_status` | Overview of agents, tasks, locks, notes |
 | `task_create` | Add tasks (batch), with `assignee`, `priority`, `depends_on` (`"$1"` = first task in the batch) |

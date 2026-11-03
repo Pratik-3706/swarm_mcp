@@ -69,6 +69,49 @@ function seemsStopped(state, a) {
   return Date.now() - Date.parse(a.lastSeen) > IDLE_MS;
 }
 
+/** Coarse presence: what the manager needs to notice changing. */
+function presence(state, a) {
+  if (a.status === "offline") return "left";
+  if (isWaiting(a)) return "waiting";
+  if (state.tasks.some((t) => t.assignee === a.name && t.status === "in_progress")) return "working";
+  return seemsStopped(state, a) ? "stopped" : "active";
+}
+
+/**
+ * Tell the manager when an agent stops responding or comes back. Joins and leaves arrive as board activity;
+ * this covers what no event marks: an agent whose turn ended quietly. One alert per change.
+ */
+function presenceAlerts(state, me) {
+  const alerts = [];
+  for (const a of Object.values(state.agents)) {
+    if (a.name === me) continue;
+    const p = presence(state, a);
+    const key = `presence:${a.name}:${p === "stopped" ? "stopped" : "up"}:${p === "stopped" ? a.lastSeen : ""}`;
+    if (p === "stopped")
+      alerts.push({ key, text: `${a.name} has stopped responding (${agentState(state, a)}). Its app's turn probably ended: ask the user to tell ${a.name} to continue, and move its tasks if needed.` });
+  }
+  return alerts;
+}
+
+/** The roster, for swarm_team. */
+export function teamText(state) {
+  const agents = Object.values(state.agents);
+  if (!agents.length) return "Nobody has joined yet.";
+  const groups = { working: [], waiting: [], active: [], stopped: [], left: [] };
+  for (const a of agents) groups[presence(state, a)].push(a);
+  const line = (a) => {
+    const t = state.tasks.find((x) => x.assignee === a.name && x.status === "in_progress");
+    const doing = t ? `#${t.id} "${t.title}"${t.progress != null ? `, ${t.progress}%` : ""}${t.eta ? `, eta ${t.eta}` : ""}` : agentState(state, a);
+    return `- ${a.name} (${a.role}${a.client ? `, ${a.client}` : ""}): ${doing}. Joined ${a.joinedAt.slice(0, 16).replace("T", " ")}, last seen ${a.lastSeen.slice(11, 16)} UTC.`;
+  };
+  const titles = { working: "Working", waiting: "Waiting for work", active: "Active", stopped: "Stopped responding (need a nudge from the user)", left: "Left the swarm" };
+  const out = [`${agents.length} agent(s) joined swarm "${state.swarm}".`];
+  for (const [k, list] of Object.entries(groups)) if (list.length) out.push("", `${titles[k]} (${list.length}):`, ...list.map(line));
+  const recent = state.events.filter((e) => e.type === "join" || e.type === "leave").slice(-8);
+  if (recent.length) out.push("", "Recent joins and leaves:", ...recent.map((e) => `- ${e.at.slice(11, 16)} ${e.text}`));
+  return out.join("\n");
+}
+
 function agentState(state, a) {
   if (a.status === "offline") return "offline";
   if (isWaiting(a)) return a.role.toLowerCase() === "manager" ? "watching the board" : "waiting for work";
@@ -909,7 +952,9 @@ export function createServer() {
       let wait = 0;
       const isManager = (state) => member(state, s.name).role.toLowerCase() === "manager";
       const newAlerts = (state) =>
-        isManager(state) ? stallAlerts(state, s.name).filter((x) => !(member(state, s.name).alerted || []).includes(x.key)) : [];
+        isManager(state)
+          ? [...presenceAlerts(state, s.name), ...stallAlerts(state, s.name)].filter((x) => !(member(state, s.name).alerted || []).includes(x.key))
+          : [];
       const pending = (state) => {
         const box = inboxFor(state, s.name);
         return box.messages.length + box.events.length + newAlerts(state).length > 0;
@@ -1083,6 +1128,17 @@ export function createServer() {
       });
       return text(out);
     }),
+  );
+
+  server.registerTool(
+    "swarm_team",
+    {
+      title: "Who's in the swarm",
+      description:
+        "The roster: every agent that joined, grouped by what it is doing now (working on which task, waiting for work, stopped responding, left), with join time, last activity and recent joins/leaves. The manager also gets alerts in swarm_inbox when an agent stops responding.",
+      inputSchema: {},
+    },
+    tool(async (_args, s) => text(await s.store.update((state) => (touch(state, s.name), teamText(state))))),
   );
 
   server.registerTool(

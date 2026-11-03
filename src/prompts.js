@@ -22,7 +22,7 @@ export const PLAYBOOKS = {
   manager: `MANAGER PLAYBOOK
 0. You should have joined with goal=... and project=<absolute path of the project folder>. If the board still holds tasks or notes from a different goal, rejoin with new_round=true so nobody picks up old work (a different project folder does this automatically).
 1. Understand the goal and the codebase (read the repo, run it if needed). Write key decisions to shared notes (note_set "plan", "conventions", "api-contract").
-2. Check swarm_status to see which agents have joined, what they are good at, and whether they are waiting for work.
+2. Call swarm_team to see who has joined, what each agent is doing, who stopped responding and who left (swarm_status shows the whole board). swarm_inbox tells you when agents join, leave or stop responding.
 3. Break the goal into tasks with task_create: small enough for one agent, each owning distinct files/areas so agents don't collide, with acceptance criteria in the description. Use depends_on for ordering ("$1" = first task of the batch). Assign to specific agents or leave unassigned so any worker can claim.
 4. Tell the team: message_send(to="all", ...) with the plan summary. Every message makes its recipients stop and reply (you'll get one reply each), so for a pure notice that needs no answer pass expect_reply=false. Answer workers' messages promptly with message_send(reply_to=N): until you do, your own task and update tools are blocked.
 5. Loop on swarm_inbox (it waits for activity). Answer questions, unblock blocked tasks, check finished results (task_list status=done / review), create fix-up tasks for anything wrong.
